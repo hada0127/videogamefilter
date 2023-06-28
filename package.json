@@ -1,0 +1,73 @@
+{
+  "name": "svelte-electron",
+  "version": "0.1.0",
+  "description": "svelte-electron",
+  "author": "hada0127",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "test": "NODE_ENV=development concurrently \"npm run web:watch\" \"npm run electron:start\"",
+    "web:watch": "vite --port 3000",
+    "electron:start": "electron src",
+    "build": "vite build",
+    "preview": "npm run build && electron src/preview",
+    "win32": "npm run build && electron-builder --win --ia32",
+    "win64": "npm run build && electron-builder --win --x64"
+  },
+  "buildDependenciesFromSource": true,
+  "build": {
+    "productName": "svelte-electron",
+    "appId": "com.yourdomain.app",
+    "asar": true,
+    "mac": {
+      "target": [
+        "default"
+      ],
+      "icon": "build/icons/iconKiosk.icns"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icons/iconKiosk.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "perMachine": true,
+      "language": 1042,
+      "installerIcon": "build/icons/iconKiosk.ico",
+      "shortcutName": "svelte-electron v${version}",
+      "artifactName": "svelte-electron v${version}.${ext}",
+      "uninstallDisplayName": "svelte-electron v${version}"
+    },
+    "directories": {
+      "buildResources": "./build/",
+      "output": "./dist/"
+    },
+    "files": [
+      "src/**/*"
+    ]
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^1.0.0-next.30",
+    "@typescript-eslint/eslint-plugin": "^5.48.2",
+    "concurrently": "^7.0.0",
+    "cross-env": "^7.0.3",
+    "electron": "^17.0.0",
+    "electron-builder": "^22.10.3",
+    "eslint": "^8.32.0",
+    "eslint-config-prettier": "^8.6.0",
+    "eslint-plugin-svelte3": "^4.0.0",
+    "prettier": "^2.8.3",
+    "prettier-plugin-svelte": "^2.9.0",
+    "svelte": "^3.44.0",
+    "vite": "^3.0.0"
+  },
+  "dependencies": {
+    "@electron/remote": "^2.0.9",
+    "json-beautify": "^1.1.1",
+    "serialport": "^10.3.0"
+  }
+}
