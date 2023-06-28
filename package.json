@@ -1,7 +1,7 @@
 {
-  "name": "svelte-electron",
+  "name": "videogameinput",
   "version": "0.1.0",
-  "description": "svelte-electron",
+  "description": "videogameinput",
   "author": "hada0127",
   "private": true,
   "main": "src/index.js",
@@ -16,7 +16,7 @@
   },
   "buildDependenciesFromSource": true,
   "build": {
-    "productName": "svelte-electron",
+    "productName": "videogameinput",
     "appId": "com.yourdomain.app",
     "asar": true,
     "mac": {
@@ -38,9 +38,9 @@
       "perMachine": true,
       "language": 1042,
       "installerIcon": "build/icons/iconKiosk.ico",
-      "shortcutName": "svelte-electron v${version}",
-      "artifactName": "svelte-electron v${version}.${ext}",
-      "uninstallDisplayName": "svelte-electron v${version}"
+      "shortcutName": "videogameinput v${version}",
+      "artifactName": "videogameinput v${version}.${ext}",
+      "uninstallDisplayName": "videogameinput v${version}"
     },
     "directories": {
       "buildResources": "./build/",

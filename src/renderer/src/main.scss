@@ -2,9 +2,13 @@ main {
   position:relative;
   width:100vw;
   height:100vh;
-  > img {
+  background-color: #000;
+  &.hidden {
+    cursor:none;
+  }
+  > video {
     width:100vw;
     height:100vh;
-    object-fit: cover;
+    object-fit: contain;
   }
 }

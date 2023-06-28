@@ -3,9 +3,51 @@
   export let effect: string;
   export let veffect: string;
   export let timer: boolean;
+
+  export let deviceId: string | undefined;
+
+  type MediaDevice = {
+    deviceId: string;
+    kind: string;
+    label: string;
+  };
+  let devices: {
+    deviceId: string;
+    label: string;
+  }[] = [];
+
+  function gotDevices(mediaDevices: MediaDevice[]) {
+    let i = 0;
+    mediaDevices.forEach((mediaDevice: MediaDevice) => {
+      if (mediaDevice.kind === 'videoinput') {
+        let tmp = {
+          deviceId: mediaDevice.deviceId,
+          label: mediaDevice.label
+        };
+        if (i === 0) {
+          deviceId = mediaDevice.deviceId;
+          i++;
+        }
+        devices.push(tmp);
+      }
+    });
+    devices = devices;
+    console.log(devices);
+  }
+  navigator.mediaDevices.enumerateDevices().then(gotDevices);
 </script>
 
 <div class="menu" class:hidden={timer === true}>
+  <label>
+    <p>Device</p>
+    {#key devices}
+      <select bind:value={deviceId}>
+        {#each devices as device}
+          <option value={device.deviceId}>{device.label}</option>
+        {/each}
+      </select>
+    {/key}
+  </label>
   <label>
     <p>Horizontal Effect</p>
     <select bind:value={effect}>

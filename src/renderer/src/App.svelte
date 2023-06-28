@@ -7,23 +7,53 @@
   /**
    * https://stackoverflow.com/questions/75718090/getusermedia-issue-with-permissions-and-domexception-could-not-start-video-so
    */
+  let cursor: boolean;
   let timer: boolean;
   let timerEvent: number;
 
   const setTimer = () => {
-    timer = false;
+    cursor = false;
     if (timerEvent) clearTimeout(timerEvent);
     timerEvent = window.setTimeout(() => {
-      timer = true;
-    }, 5000);
+      // timer = true;
+      cursor = true;
+    }, 3000);
   };
 
   document.addEventListener('mousemove', setTimer);
   document.addEventListener('mousedown', setTimer);
+
+  let video: HTMLVideoElement;
+  let deviceId: string | undefined;
+
+  $: if (deviceId) {
+    console.log(deviceId);
+    navigator.mediaDevices
+      .getUserMedia({
+        video: {
+          deviceId: {
+            exact: deviceId
+          }
+        },
+        audio: false
+      })
+      .then(function (stream) {
+        video.srcObject = stream;
+      })
+      .catch(function () {
+        console.log('Something went wrong!');
+      });
+  }
 </script>
 
-<main>
-  <img src="asset/temp.png" alt="" />
-  <Effect bind:effect={$settingUI.effect} bind:veffect={$settingUI.veffect} />
-  <Menu bind:effect={$settingUI.effect} bind:veffect={$settingUI.veffect} bind:timer />
+<main class:hidden={cursor === true}>
+  <!-- svelte-ignore a11y-media-has-caption -->
+  <video bind:this={video} autoplay muted id="videoElement" />
+  <Effect bind:effect={$settingUI.effect} bind:veffect={$settingUI.veffect} bind:timer />
+  <Menu
+    bind:effect={$settingUI.effect}
+    bind:veffect={$settingUI.veffect}
+    bind:timer
+    bind:deviceId
+  />
 </main>

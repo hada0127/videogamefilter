@@ -2,6 +2,7 @@
   import './Effect.scss';
   export let effect: string;
   export let veffect: string;
+  export let timer: boolean;
 </script>
 
 <div
@@ -12,6 +13,7 @@
   class:scanline40={veffect === 'scanline40'}
   class:scanline50={veffect === 'scanline50'}
 />
+<!-- svelte-ignore a11y-click-events-have-key-events -->
 <div
   class="effect"
   class:scanline10={effect === 'scanline10'}
@@ -19,4 +21,7 @@
   class:scanline30={effect === 'scanline30'}
   class:scanline40={effect === 'scanline40'}
   class:scanline50={effect === 'scanline50'}
+  on:click={() => {
+    timer = !timer;
+  }}
 />
