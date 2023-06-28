@@ -1,0 +1,52 @@
+div.veffect {
+  position:fixed;
+  left:0;
+  top:0;
+  z-index:100;
+  width:100vw;
+  height:100vh;
+  background-image: url( "asset/vscanline.png" );
+  background-repeat: repeat;
+  opacity:0;
+  &.scanline10 {
+    opacity:0.1;
+  }
+  &.scanline20 {
+    opacity:0.2;
+  }
+  &.scanline30 {
+    opacity:0.3;
+  }
+  &.scanline40 {
+    opacity:0.4;
+  }
+  &.scanline50 {
+    opacity:0.5;
+  }
+}
+div.effect {
+  position:fixed;
+  left:0;
+  top:0;
+  z-index:100;
+  width:100vw;
+  height:100vh;
+  background-image: url( "asset/scanline.png" );
+  background-repeat: repeat;
+  opacity:0;
+  &.scanline10 {
+    opacity:0.1;
+  }
+  &.scanline20 {
+    opacity:0.2;
+  }
+  &.scanline30 {
+    opacity:0.3;
+  }
+  &.scanline40 {
+    opacity:0.4;
+  }
+  &.scanline50 {
+    opacity:0.5;
+  }
+}

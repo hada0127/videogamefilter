@@ -1,0 +1,15 @@
+{
+	"compilerOptions": {
+		"ignoreDeprecations": "5.0",
+		"allowJs": true,
+		"checkJs": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"strict": true,
+	},
+  "include": [ "@types/*.d.ts" , "src/**/*.d.ts" ,  "src/**/*.ts" ,  "src/**/*.svelte" , ".svelte-kit/ambient.d.ts" ],
+	"exclude": ["node_modules", "dist", "src/renderer/dist"]
+}

@@ -1,0 +1,32 @@
+div.menu {
+  position:fixed;
+  z-index:200;
+  left:50%;
+  bottom:50px;
+  background-color: #FFF;
+  transform: translateX(-50%);
+  display:flex;
+  padding:20px;
+  border-radius: 10px;
+  box-shadow: 0 2px 5px rgba(0,0,0, 0.1);
+  flex-direction:column;
+  gap:10px;
+  transition:0.5s;
+  &.hidden {
+    transform: translateX(-50%) translateY(300px);
+  }
+  > label {
+    display: block;
+    width:280px;
+    > p {
+      display:inline-block;
+      width:130px;  
+      margin-right:10px;
+    }
+    > select {
+      display:inline-block;
+      width:130px;
+      padding:5px;
+    }
+  }
+}
