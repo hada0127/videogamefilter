@@ -1,7 +1,7 @@
 {
-  "name": "videogameinput",
-  "version": "0.1.0",
-  "description": "videogameinput",
+  "name": "videogamefilter",
+  "version": "0.2.0",
+  "description": "videogamefilter",
   "author": "hada0127",
   "private": true,
   "main": "src/index.js",
@@ -11,25 +11,32 @@
     "electron:start": "electron src",
     "build": "vite build",
     "preview": "npm run build && electron src/preview",
+    "mac": "npm run build && electron-builder --mac",
     "win32": "npm run build && electron-builder --win --ia32",
     "win64": "npm run build && electron-builder --win --x64"
   },
   "buildDependenciesFromSource": true,
   "build": {
-    "productName": "videogameinput",
-    "appId": "com.yourdomain.app",
+    "productName": "Video game filter",
+    "appId": "net.tarucy.videogamefilter",
     "asar": true,
     "mac": {
       "target": [
         "default"
       ],
-      "icon": "build/icons/iconKiosk.icns"
+      "icon": "build/icons/icon.icns",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Please give us access to your microphone",
+        "NSCameraUsageDescription": "Please give us access to your camera",
+        "com.apple.security.device.audio-input": true,
+        "com.apple.security.device.camera": true
+      }
     },
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "build/icons/iconKiosk.ico"
+      "icon": "build/icons/icon.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -37,10 +44,10 @@
       "createDesktopShortcut": true,
       "perMachine": true,
       "language": 1042,
-      "installerIcon": "build/icons/iconKiosk.ico",
-      "shortcutName": "videogameinput v${version}",
-      "artifactName": "videogameinput v${version}.${ext}",
-      "uninstallDisplayName": "videogameinput v${version}"
+      "installerIcon": "build/icons/icon.ico",
+      "shortcutName": "Video game filter v${version}",
+      "artifactName": "Video game filter v${version}.${ext}",
+      "uninstallDisplayName": "Video game filter v${version}"
     },
     "directories": {
       "buildResources": "./build/",
@@ -55,21 +62,19 @@
     "@typescript-eslint/eslint-plugin": "^5.48.2",
     "concurrently": "^7.0.0",
     "cross-env": "^7.0.3",
-    "electron": "^17.0.0",
-    "electron-builder": "^22.10.3",
+    "electron": "^27.0.2",
+    "electron-builder": "^24.6.4",
     "eslint": "^8.32.0",
     "eslint-config-prettier": "^8.6.0",
     "eslint-plugin-svelte3": "^4.0.0",
     "prettier": "^2.8.3",
     "prettier-plugin-svelte": "^2.9.0",
     "svelte": "^3.44.0",
-    "vite": "^3.0.0"
+    "vite": "^3.0.0",
+    "sass": "^1.63.6",
+    "svelte-preprocess": "^5.0.4"
   },
   "dependencies": {
-    "@electron/remote": "^2.0.9",
-    "json-beautify": "^1.1.1",
-    "sass": "^1.63.6",
-    "serialport": "^10.3.0",
-    "svelte-preprocess": "^5.0.4"
+    "@electron/remote": "^2.0.9"
   }
 }

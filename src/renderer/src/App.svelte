@@ -4,9 +4,7 @@
   import { settingUI } from './store';
   import Menu from './Menu.svelte';
   import Effect from './Effect.svelte';
-  /**
-   * https://stackoverflow.com/questions/75718090/getusermedia-issue-with-permissions-and-domexception-could-not-start-video-so
-   */
+
   let cursor: boolean;
   let timer: boolean;
   let timerEvent: number;
@@ -15,7 +13,6 @@
     cursor = false;
     if (timerEvent) clearTimeout(timerEvent);
     timerEvent = window.setTimeout(() => {
-      // timer = true;
       cursor = true;
     }, 3000);
   };
@@ -24,36 +21,45 @@
   document.addEventListener('mousedown', setTimer);
 
   let video: HTMLVideoElement;
-  let deviceId: string | undefined;
+  let videoDeviceId: string | undefined;
+  let audioDeviceId: string | undefined;
+  let isChange = false;
 
-  $: if (deviceId) {
-    console.log(deviceId);
+  $: if (isChange === true) {
+    isChange = false;
     navigator.mediaDevices
       .getUserMedia({
-        video: {
-          deviceId: {
-            exact: deviceId
-          }
+        audio: {
+          deviceId: audioDeviceId ? { exact: audioDeviceId } : undefined,
+          noiseSuppression: false,
+          echoCancellation: false
         },
-        audio: false
+        video: {
+          deviceId: videoDeviceId ? { exact: videoDeviceId } : undefined,
+          width: 1920,
+          height: 1080
+        }
       })
       .then(function (stream) {
         video.srcObject = stream;
+        video.play();
       })
-      .catch(function () {
-        console.log('Something went wrong!');
+      .catch(function (e) {
+        console.log(e);
       });
   }
 </script>
 
 <main class:hidden={cursor === true}>
   <!-- svelte-ignore a11y-media-has-caption -->
-  <video bind:this={video} autoplay muted id="videoElement" />
+  <video bind:this={video} id="videoElement" />
   <Effect bind:effect={$settingUI.effect} bind:veffect={$settingUI.veffect} bind:timer />
   <Menu
     bind:effect={$settingUI.effect}
     bind:veffect={$settingUI.veffect}
     bind:timer
-    bind:deviceId
+    bind:videoDeviceId
+    bind:audioDeviceId
+    bind:isChange
   />
 </main>

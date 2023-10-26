@@ -17,14 +17,13 @@ function createWindow() {
     width: 1200,
     height: 800,
     frame: true,
-    //    alwaysOnTop: true,
     center: true,
     resizable: true,
-    fullscreen: false,        
+    fullscreen: false,
+    fullscreenable: true,
     webPreferences: {
-        nodeIntegration: true, // to allow require
-        contextIsolation: false, // allow use with Electron 12+
-        // preload: path.join(__dirname, 'preload.js'),
+        nodeIntegration: true,
+        contextIsolation: false, 
         enableRemoteModule: true
     }
   })
