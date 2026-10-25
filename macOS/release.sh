@@ -35,6 +35,13 @@ PY
     xcodebuild -exportArchive -archivePath build/VideoGameFilter.xcarchive -exportOptionsPlist build/ExportOptions.plist -exportPath build/notarized -allowProvisioningUpdates
 fi
 # If Apple is still processing, rerun with --resume; no new build/submission.
+# Xcode refuses to overwrite an older exported app. This directory contains
+# generated distribution artifacts only; never reuse stale ZIPs after a failure.
+python3 - <<'PYCLEAN'
+import pathlib, shutil
+output = pathlib.Path('build/release')
+if output.exists(): shutil.rmtree(output)
+PYCLEAN
 xcodebuild -exportNotarizedApp -archivePath build/VideoGameFilter.xcarchive -exportPath build/release
 app="$PWD/build/release/Video Game Filter.app"
 xcrun stapler validate "$app"
