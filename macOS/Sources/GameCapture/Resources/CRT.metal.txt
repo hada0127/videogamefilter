@@ -1,0 +1,99 @@
+#include <metal_stdlib>
+using namespace metal;
+struct Vertex { float4 position [[position]]; };
+struct Parameters { float4 sizes; float4 crt; float4 extra; float4 scan; float4 display; float4 post; };
+vertex Vertex screenVertex(uint index [[vertex_id]]) {
+    const float2 vertices[3] = {float2(-1,-1), float2(3,-1), float2(-1,3)};
+    return { float4(vertices[index], 0, 1) };
+}
+float3 toLinear(float3 c) {
+    return select(c / 12.92, pow((c + 0.055) / 1.055, float3(2.4)), c > 0.04045);
+}
+float3 toSRGB(float3 c) {
+    return select(c * 12.92, 1.055 * pow(max(c, 0.0), float3(1.0/2.4)) - 0.055, c > 0.0031308);
+}
+float3 brightPart(float3 c) {
+    float3 linear = toLinear(c);
+    return linear * smoothstep(0.25, 0.65, max(linear.r, max(linear.g, linear.b)));
+}
+// Extract BEFORE 2x2 downsampling so small highlights survive averaging.
+fragment float4 brightFragment(Vertex in [[stage_in]], texture2d<float> source [[texture(0)]]) {
+    constexpr sampler s(coord::pixel, address::clamp_to_edge, filter::nearest);
+    float2 p = floor(in.position.xy) * 2.0 + 0.5;
+    float3 bright = brightPart(source.sample(s, p).rgb)
+                  + brightPart(source.sample(s, p + float2(1,0)).rgb)
+                  + brightPart(source.sample(s, p + float2(0,1)).rgb)
+                  + brightPart(source.sample(s, p + float2(1,1)).rgb);
+    return float4(bright * 0.25, 1);
+}
+// Sharp-Shimmerless area-overlap coordinate adjustment, adapted from zadpos /
+// Woohyun-Kang (CC0). Used for enlargement only; downscaling uses linear sampling.
+float2 sharpUV(float2 uv, float2 outputSize, float2 sourceSize) {
+    float2 pixel = uv * outputSize;
+    float2 lo = floor(pixel), hi = ceil(pixel);
+    float2 scale = outputSize / sourceSize;
+    float2 a = floor(lo / scale), b = floor(hi / scale);
+    float2 coord = b + 0.5 - (scale * b - lo);
+    coord = select(coord, b + 0.5, a == b);
+    return coord / sourceSize;
+}
+// Exact box integral of periodic dark bands in final display pixels.
+float bandIntegral(float x, float period, float width) {
+    float cycle = floor(x / period);
+    return cycle * width + min(x - cycle * period, width);
+}
+float bandCoverage(float center, float footprint, float period, float width) {
+    return clamp((bandIntegral(center + footprint*0.5, period, width) - bandIntegral(center - footprint*0.5, period, width)) / footprint, 0.0, 1.0);
+}
+fragment float4 screenFragment(Vertex in [[stage_in]], texture2d<float> source [[texture(0)]], texture2d<float> bloom [[texture(1)]], texture2d<float> softened [[texture(2)]], constant Parameters& p [[buffer(0)]]) {
+    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 sourceSize = p.sizes.xy, outputSize = p.sizes.zw;
+    float fit = min(outputSize.x/sourceSize.x, outputSize.y/sourceSize.y);
+    float2 imageSize = sourceSize * fit;
+    float2 uv = (in.position.xy - (outputSize-imageSize)*0.5) / imageSize;
+    if (any(uv < 0.0) || any(uv > 1.0)) return float4(0,0,0,1);
+    // Fixed panel-pixel spacing; independent of input and fitted image size.
+    float2 widths = float2(p.scan.z, p.extra.z);
+    float2 periods = widths + float2(p.scan.w, p.extra.w);
+    float2 footprint = max(p.display.xy, float2(0.01));
+    float2 gridPixel = in.position.xy * footprint + p.display.zw - floor((outputSize-imageSize)*0.5 * footprint + p.display.zw);
+    float2 centered = uv*2.0-1.0;
+    if (p.crt.x > 0.5) {
+        uv = (centered * (1.0 + p.crt.y * dot(centered,centered)) + 1.0) * 0.5;
+        if (any(uv < 0.0) || any(uv > 1.0)) return float4(0,0,0,1);
+    }
+    // Core Image texture rows use the opposite vertical origin to Metal screen coordinates.
+    uv.y = 1.0 - uv.y;
+    float2 sampleUV = (p.extra.y > 0.5 && fit >= 1.0 && p.crt.x < 0.5) ? sharpUV(uv,imageSize,sourceSize) : uv;
+    float3 color = source.sample(linearSampler,sampleUV).rgb;
+    if (p.post.x > 0.0) color = mix(color, softened.sample(linearSampler, sampleUV).rgb, p.post.x);
+    float3 maskChroma = float3(0.0);
+    float maskMean = 1.0;
+    if (p.crt.x > 0.5) {
+        if (p.crt.z > 0.0) {
+            float3 halo = bloom.sample(linearSampler, uv).rgb;
+            // Screen blend in linear light: halo spreads into dark surroundings
+            // without clipping already bright cores to large white patches.
+            float3 base = toLinear(color);
+            color = toSRGB(1.0 - (1.0-base) * (1.0-clamp(halo * (2.0*p.crt.z), 0.0, 1.0)));
+        }
+        color *= 1.0 - p.crt.w * smoothstep(0.15,1.8,dot(centered,centered));
+        // One RGB triad per three panel pixels when footprint <= 1.
+        // Enlarge the triad in low-resolution modes to stay below drawable Nyquist.
+        // Integrate chroma over the drawable footprint before OS compositing.
+        float wavelength = 3.0 * max(1.0, ceil(footprint.x));
+        float omega = 2.0 * M_PI_F / wavelength;
+        float pixelAverage = sin(omega * footprint.x * 0.5) / (omega * footprint.x * 0.5);
+        float phase = omega * fmod(gridPixel.x, wavelength);
+        float3 wave = cos(float3(phase, phase - 2.0*M_PI_F/3.0, phase - 4.0*M_PI_F/3.0));
+        maskMean = 1.0 - p.extra.x * (2.0/3.0);
+        maskChroma = p.extra.x * wave * (pixelAverage/3.0);
+    }
+    // Integrate line coverage in panel space. Compose chroma separately from
+    // the varying line coverage to avoid shader-side mask/line products.
+    float lineAttenuation = (1.0 - p.scan.x * bandCoverage(gridPixel.y, footprint.y, periods.x, widths.x))
+                          * (1.0 - p.scan.y * bandCoverage(gridPixel.x, footprint.x, periods.y, widths.y));
+    float meanLines = (1.0-p.scan.x*widths.x/periods.x) * (1.0-p.scan.y*widths.y/periods.y);
+    color *= lineAttenuation * maskMean + maskChroma * meanLines;
+    return float4(clamp(color,0.0,1.0),1.0);
+}

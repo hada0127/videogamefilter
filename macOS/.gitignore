@@ -1,0 +1,6 @@
+.build/
+build/
+.swiftpm/
+
+# Local verification notes; release evidence lives under build/.
+QA.txt
