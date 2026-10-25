@@ -1,0 +1,14 @@
+Copyright 2026 Hada Type Foundry.
+Copyright 2024 Wanted Lab, Inc.
+Copyright 2023 Kil Hyung-jin.
+Copyright 2022 Sun.
+Copyright 2014-2021 Adobe.
+Copyright 2019 eBay Korea Co., Ltd.
+Copyright © 2019 RIDI & Sandoll. All rights reserved. Font designed by Sandoll Inc.
+© NAVER Corp. © NAVER Cultural Foundation Corp.
+Copyright NAVER Corp.
+Copyright 2021 The Gowun Batang Project Authors (https://github.com/yangheeryu/Gowun-Batang)
+Copyright 2015-2026 Belleve Invis.
+
+The notices above are retained to satisfy the SIL Open Font License 1.1
+for the Font Software components used by the reproducible build.
