@@ -22,6 +22,13 @@ struct EffectSettings: Codable, Equatable {
         curvature: 0, glow: 0.25, vignette: 0.46, mask: 0.38, sharp: true,
         horizontalWidth: 4, horizontalGap: 4, verticalWidth: 4, verticalGap: 4,
         glowRadius: 10, antiAliasing: 0.41)
+    static let verticalCRT: EffectSettings = {
+        var value = defaultCRT
+        swap(&value.horizontal, &value.vertical)
+        swap(&value.horizontalWidth, &value.verticalWidth)
+        swap(&value.horizontalGap, &value.verticalGap)
+        return value
+    }()
     var normalized: EffectSettings {
         var copy = self
         func bound(_ v: Double, _ upper: Double) -> Double { v.isFinite ? min(upper, max(0, v)) : 0 }
@@ -53,6 +60,7 @@ struct EffectPreset: Codable, Identifiable, Equatable {
         EffectPreset(id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!, name: "가로 스캔라인 25%", settings: EffectSettings(horizontal: 0.25)),
         EffectPreset(id: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!, name: "그리드 27%", settings: EffectSettings(horizontal: 0.27, vertical: 0.27, sharp: true)),
         EffectPreset(id: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!, name: "CRT · 기본", settings: .defaultCRT),
+        EffectPreset(id: UUID(uuidString: "00000000-0000-0000-0000-000000000006")!, name: "CRT · 기본 (세로)", settings: .verticalCRT),
         EffectPreset(id: UUID(uuidString: "00000000-0000-0000-0000-000000000005")!, name: "CRT · 선명하게", settings: EffectSettings(horizontal: 0.15, crt: true, curvature: 0.06, glow: 0.06, vignette: 0.15, mask: 0.1, sharp: true))
     ]
     init(defaults: UserDefaults = .standard) {

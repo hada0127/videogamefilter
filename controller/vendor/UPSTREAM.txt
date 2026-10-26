@@ -1,0 +1,7 @@
+NXBT: https://github.com/Brikwerk/nxbt
+Revision: ec4b800ad6c55de96bb6c7f9f84b5bdc59a4c975 (MIT; NXBT-LICENSE)
+Only core Python files and controller SDP are included; web/TUI dependencies are unused.
+Local changes: correct SIGTERM handler signature, join terminated children before shutting down shared managers, remove call to nonexistent reset_address (no address change is performed).
+Also accept already-connected state during create_controller to avoid a fast-reconnection race.
+Latency: read direct_input once per loop; skip disabled debug formatting; calculate sleep from current iteration start (132 Hz instead of counting the previous sleep).
+Use effective logger level so disabled logging actually skips debug work.

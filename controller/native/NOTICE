@@ -1,0 +1,8 @@
+Switch Bluetooth report layouts and calibration data are adapted from NXBT (MIT).
+See ../vendor/NXBT-LICENSE and ../vendor/UPSTREAM.txt.
+USB report layout and descriptor reference:
+https://github.com/shinyquagsire23/Switch-Fightstick (Descriptors.c and Joystick.h).
+Bluetooth report bit layout cross-checked with:
+https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering/blob/master/bluetooth_hid_notes.md
+The native implementation is a local development build. Hardware compatibility must
+be verified separately from protocol unit tests.
