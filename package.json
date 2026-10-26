@@ -1,7 +1,7 @@
 {
-  "name": "videogamefilter",
+  "name": "switch-remote",
   "version": "0.2.0",
-  "description": "videogamefilter",
+  "description": "Capture-card viewing and remote console control",
   "author": "hada0127",
   "private": true,
   "main": "src/index.js",
@@ -17,7 +17,7 @@
   },
   "buildDependenciesFromSource": true,
   "build": {
-    "productName": "Video game filter",
+    "productName": "switch-remote",
     "appId": "net.tarucy.videogamefilter",
     "asar": true,
     "mac": {
@@ -45,9 +45,9 @@
       "perMachine": true,
       "language": 1042,
       "installerIcon": "build/icons/icon.ico",
-      "shortcutName": "Video game filter v${version}",
-      "artifactName": "Video game filter v${version}.${ext}",
-      "uninstallDisplayName": "Video game filter v${version}"
+      "shortcutName": "switch-remote v${version}",
+      "artifactName": "switch-remote v${version}.${ext}",
+      "uninstallDisplayName": "switch-remote v${version}"
     },
     "directories": {
       "buildResources": "./build/",

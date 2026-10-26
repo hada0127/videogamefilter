@@ -55,7 +55,9 @@ final class EffectsTests: XCTestCase {
         let options = [("horizontal", "가로 스캔라인 25%"), ("grid", "그리드 27%"), ("a", "고전게임"), ("b", "고전게임")]
         let picker = ClassicPicker(title: "Preset", selection: Binding(get: { selected }, set: { selected = $0 }), options: options, enabled: true)
         let coordinator = picker.makeCoordinator()
-        let view = NSPopUpButton(frame: .zero, pullsDown: false)
+        let view = TouchPopUpButton(frame: .zero, pullsDown: false)
+        view.cell = TouchPopUpCell(textCell: "", pullsDown: false)
+        XCTAssertGreaterThanOrEqual(view.intrinsicContentSize.height, 72)
         picker.configure(view, coordinator: coordinator)
         XCTAssertEqual(view.numberOfItems, 4)
         XCTAssertEqual(view.itemTitles.filter { $0 == "고전게임" }.count, 2)
@@ -78,6 +80,18 @@ final class EffectsTests: XCTestCase {
         picker.configure(view, coordinator: coordinator)
         XCTAssertEqual(view.indexOfSelectedItem, 1)
         XCTAssertEqual(menu.items.filter { $0.state == .on }.count, 1)
+    }
+    @MainActor func testVerticalCRTMatchesDefaultWithSwappedScanlines() {
+        var expected = EffectSettings.defaultCRT
+        expected.horizontal = EffectSettings.defaultCRT.vertical
+        expected.vertical = EffectSettings.defaultCRT.horizontal
+        expected.horizontalWidth = EffectSettings.defaultCRT.verticalWidth
+        expected.verticalWidth = EffectSettings.defaultCRT.horizontalWidth
+        expected.horizontalGap = EffectSettings.defaultCRT.verticalGap
+        expected.verticalGap = EffectSettings.defaultCRT.horizontalGap
+        XCTAssertEqual(EffectSettings.verticalCRT, expected)
+        XCTAssertEqual(EffectsStore.builtins.first { $0.name == "CRT · 기본 (세로)" }?.settings, expected)
+        XCTAssertEqual(Set(EffectsStore.builtins.map(\.id)).count, EffectsStore.builtins.count)
     }
     func testExistingPresetsWithoutLineCountMigrate() throws {
         let json = #"{"horizontal":0.5,"vertical":0.2,"crt":true,"curvature":0.03,"glow":0.18,"vignette":0.25,"mask":0.15,"sharp":false}"#

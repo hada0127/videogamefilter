@@ -1,75 +1,79 @@
-# Video Game Filter
+# switch-remote
 
-<p align="center"><img src="build/icons/icon.png" width="200" height="200" alt="Video Game Filter icon"></p>
+<p align="center"><img src="build/icons/icon.png" width="160" height="160" alt="switch-remote icon"></p>
 
-[English](#english) · [한국어](#한국어)
+[한국어 사용 설명서](README.ko.md) · [Download](https://github.com/hada0127/switch-remote/releases/latest)
 
-## English
+Play your Switch on your Mac through a capture card. Add a Raspberry Pi Zero W if you also want to use a controller connected to your Mac.
 
-### Introduction
+Previously called Video Game Filter. Your saved settings and presets carry over. After installing switch-remote, remove the old app from Applications to avoid opening it by mistake.
 
-Video Game Filter displays video and audio from a capture card and adds adjustable CRT and scanline effects for retro gaming.
+## What you need
 
-### Native macOS 0.3.0
+- An Apple Silicon Mac with macOS 14 or later.
+- A capture card that works with macOS, an HDMI cable, and your Switch dock.
+- For controller forwarding: a Raspberry Pi Zero W, a microSD card, and a USB data cable.
 
-A lightweight SwiftUI/Metal viewer with CRT effects, independent horizontal/vertical scanline controls, bloom strength and radius, whole-video smoothing, resolution selection, audio playback, full screen and saved effect presets. Hada Sans is bundled.
+You can watch and hear the Switch without a Pi. The Pi is only needed to send controller input to the console.
 
-New installations start with **CRT Default** (displayed as **CRT · 기본** in the app). Existing settings and user presets are preserved.
+## Get started
 
-- Requires macOS 14 or later and Apple Silicon (arm64).
-- Developer ID-signed and Apple-notarized.
-- Capture resolution and frame rate depend on the device. HD60 X supports 4K30 capture, not 4K60 capture.
-- Controller emulation, recording and streaming are not included.
-- [Build instructions and effect details](macOS/README.md)
+1. [Download the latest release](https://github.com/hada0127/switch-remote/releases/latest) and unzip it.
+2. Move `switch-remote.app` to Applications and open it.
+3. Connect the Switch dock's HDMI output to the capture card, then connect the card to your Mac.
+4. Allow camera and microphone access when macOS asks. These permissions let the app receive the card's picture and sound.
+5. Click the picture to open settings.
 
-### Download and use
+The app has three tabs. The tab names are currently shown in Korean.
 
-[Download the latest release](https://github.com/hada0127/videogamefilter/releases/latest).
+## Basic settings (기본)
 
-1. Extract the ZIP and move `Video Game Filter.app` to Applications.
-2. Launch the app and allow camera and microphone access when prompted.
-3. Select your video device, audio device and capture resolution.
-4. Choose a preset or adjust the effects. Click the video to show or hide settings.
+Choose your video device, audio device, and resolution/frame rate. If you see a picture but hear nothing, check the audio device first.
 
-### Legacy version
+The available resolutions depend on your capture card. A card that passes 4K60 through to a TV may capture at a lower resolution or frame rate. For example, Elgato HD60 X captures up to 4K30.
 
-The original Electron version for macOS Apple Silicon and Windows x64/x86 is available in [v0.2](https://github.com/hada0127/videogamefilter/releases/tag/v0.2). The native macOS release does not include an Intel Mac binary.
+Press **Control–Command–F** for full screen. Click **×** to close settings; click the picture to open them again. The pointer hides after three seconds without movement and returns when you move it.
 
-### Contact and license
+## Retro effects (레트로 효과)
 
-Use [GitHub Issues](https://github.com/hada0127/videogamefilter/issues) for bug reports and feature requests. The application is [MIT-licensed](LICENSE.md); bundled fonts and shader references include their own license notices.
+Start with a preset:
 
-## 한국어
+- **Original (원본):** no effects.
+- **CRT · 기본:** the default CRT look.
+- **CRT · 기본 (세로):** the same look with vertical scanlines.
+- **CRT · 선명하게:** a lighter CRT effect.
+- **가로 스캔라인 25% / 그리드 27%:** horizontal lines or a grid.
 
-### 소개
+You can change horizontal and vertical line strength, thickness, and spacing separately. CRT adds screen curvature, glow, darker edges, and an RGB mask. Antialiasing softens the game picture while leaving the scanlines and mask intact. Sharp enlargement is also available.
 
-Video Game Filter는 캡처 카드의 영상과 오디오를 표시하고, 레트로 게임을 위한 CRT·스캔라인 효과를 조절할 수 있는 앱입니다.
+Use **새 프리셋 저장** to save your own look. **덮어쓰기** updates a selected custom preset; **삭제** removes it. Built-in presets cannot be overwritten or deleted. New installations start with CRT · 기본; existing settings are kept.
 
-### macOS 네이티브 0.3.0
+## Controller settings (컨트롤러)
 
-SwiftUI와 Metal로 만든 가벼운 뷰어입니다. CRT 효과, 가로·세로 스캔라인 개별 조절, 빛 번짐 강도·반경, 영상 전체 부드러움, 해상도 선택, 오디오 재생, 전체 화면, 사용자 프리셋을 지원하며 Hada Sans를 내장했습니다.
+The Pi sends your Mac controller's input to the Switch. USB from the Pi to the dock is the preferred connection; Bluetooth is also supported.
 
-새로 설치하면 **CRT · 기본** 프리셋으로 시작합니다. 기존 설정과 사용자 프리셋은 유지됩니다.
+1. Use Raspberry Pi Imager to write **Raspberry Pi OS Lite, 32-bit (Bookworm or newer)** to the card. Set up the Pi's **2.4 GHz Wi-Fi**.
+2. With the card still connected to your Mac, choose **새 파이 SD 준비…** in the Controller tab and select its `bootfs` volume.
+3. Eject the card, put it in the Pi, and connect the Pi's **USB data port** to the Switch dock with a data cable. The other micro-USB port is power only.
+4. Give the first boot a few minutes and allow local network access on the Mac. The Pi needs internet access for its first setup. Keep the Mac and Pi on the same network.
+5. Connect a gamepad to the Mac and select it under **입력 장치**. Leave automatic connection enabled to reconnect to the saved Pi later.
 
-- macOS 14 이상, Apple Silicon(arm64)이 필요합니다.
-- Developer ID 서명과 Apple 공증을 완료했습니다.
-- 캡처 해상도와 프레임률은 장치에 따라 다릅니다. HD60 X는 4K30 캡처까지 지원하며 4K60 캡처는 지원하지 않습니다.
-- 컨트롤러 에뮬레이션·녹화·스트리밍은 포함하지 않습니다.
-- [빌드 방법과 효과 설명 — 영문](macOS/README.md)
+If A/B and X/Y feel reversed, turn on **A/B · X/Y 맞바꾸기**. Local controllers send input while the Mac app is active. HOME, Capture, and L+R are available above every settings tab.
 
-### 다운로드 및 사용
+For first-time Bluetooth pairing, open **Controllers → Change Grip/Order** on the Switch. For USB setup details or troubleshooting, see the [Pi guide](controller/README.md).
 
-[최신 릴리즈 다운로드](https://github.com/hada0127/videogamefilter/releases/latest)
+Switch 2 wake from sleep, rumble, motion controls, and NFC are not supported. Turn on the Switch before connecting.
 
-1. ZIP을 풀어 `Video Game Filter.app`을 응용 프로그램 폴더로 옮깁니다.
-2. 앱을 실행하고 요청 시 카메라·마이크 접근을 허용합니다.
-3. 영상 장치, 오디오 장치, 캡처 해상도를 선택합니다.
-4. 프리셋을 선택하거나 효과를 조절합니다. 영상을 클릭하면 설정을 표시하거나 숨길 수 있습니다.
+## Moonlight, briefly
 
-### 이전 버전
+Moonlight can show your Mac's screen on an iPhone or Android device. Remote controller input needs the [modified Sunshine helper](controller/sunshine/README.md), which is a separate setup and is not bundled with this download. In the app, select **문라이트 · 선샤인** as the input device.
 
-macOS Apple Silicon과 Windows x64/x86용 기존 Electron 버전은 [v0.2](https://github.com/hada0127/videogamefilter/releases/tag/v0.2)에서 받을 수 있습니다. macOS 네이티브 릴리즈에는 Intel Mac용 바이너리가 없습니다.
+For access away from home, connect both devices to Tailscale and add the Mac's Tailscale address in Moonlight. Leave the Mac, app, Pi, and Switch on. Test away-from-home video and controls separately; a test on home Wi-Fi does not verify that connection.
 
-### 문의 및 라이선스
+## More
 
-버그 제보와 기능 요청은 [GitHub Issues](https://github.com/hada0127/videogamefilter/issues)를 이용해 주세요. 앱은 [MIT 라이선스](LICENSE.md)이며, 내장 폰트와 셰이더 참고 자료에는 각각의 라이선스 고지를 포함했습니다.
+- [Build the Mac app and learn about its effects](macOS/README.md)
+- [Report a problem](https://github.com/hada0127/switch-remote/issues)
+- [Older Electron version for macOS and Windows](https://github.com/hada0127/switch-remote/releases/tag/v0.2)
+
+Built with SwiftUI and Metal, with Hada Sans included. This release is for Apple Silicon Macs. The app does not record video. It is [MIT licensed](LICENSE.md); bundled fonts and controller/shader sources have their own license notices.
