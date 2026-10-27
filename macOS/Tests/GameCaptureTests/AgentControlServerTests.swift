@@ -12,6 +12,7 @@ final class FakeAgentHost: @unchecked Sendable {
     var releases = 0
     var frame: CVPixelBuffer?
     var gate: DispatchSemaphore?
+    let entered = DispatchSemaphore(value: 0)
     let queue = DispatchQueue(label: "test.agent.host")
 
     var host: AgentControlHost {
@@ -26,7 +27,7 @@ final class FakeAgentHost: @unchecked Sendable {
             release: { [self] in lock.lock(); releases += 1; lock.unlock(); return ["released": true] },
             frame: { [self] in
                 lock.lock(); let gate = gate, frame = frame; lock.unlock()
-                gate?.wait()
+                if let gate { entered.signal(); gate.wait() }
                 guard let frame else { return .failure(AgentError(.noFrame, "no frame")) }
                 return .success((frame, 7, ProcessInfo.processInfo.systemUptime))
             })
@@ -150,11 +151,9 @@ final class AgentControlServerTests: XCTestCase {
         DispatchQueue.global().async { [socketPath] in
             firstResponse = try? AgentClient.request("snapshot", socket: socketPath, timeout: 5); first.fulfill()
         }
-        // Wait until the first request is parked on the host queue.
-        let deadline = Date().addingTimeInterval(2)
-        var second: [String: Any] = [:]
-        repeat { second = try request("snapshot"); usleep(5000) } while errorCode(second) != "busy" && Date() < deadline
-        XCTAssertEqual(errorCode(second), "busy")
+        // The first request is parked on the host queue; a second one must not queue behind it.
+        XCTAssertEqual(fake.entered.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(errorCode(try request("snapshot")), "busy")
         gate.signal()
         wait(for: [first], timeout: 5)
         XCTAssertEqual(firstResponse?["ok"] as? Bool, true)

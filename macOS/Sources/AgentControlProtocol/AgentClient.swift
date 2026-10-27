@@ -39,15 +39,18 @@ public enum AgentClient {
         let id = UUID().uuidString
         let line = AgentJSON.line(["v": AgentProtocol.version, "id": id, "cmd": cmd, "args": args])
         var offset = 0
+        var sendError: String?
         while offset < line.count {
             let sent = line.withUnsafeBytes { Darwin.send(fd, $0.baseAddress! + offset, line.count - offset, 0) }
-            guard sent > 0 else { throw Failure.io("send: \(String(cString: strerror(errno)))") }
+            // The app may answer and close first (for example "busy"); read that answer below.
+            guard sent > 0 else { sendError = "send: \(String(cString: strerror(errno)))"; break }
             offset += sent
         }
         var response = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         while !response.contains(10) {
             let count = Darwin.recv(fd, &buffer, buffer.count, 0)
+            if let sendError, count <= 0 { throw Failure.io(sendError) }
             if count == 0 { throw Failure.io("connection closed before a response") }
             guard count > 0 else { throw Failure.io(errno == EAGAIN ? "timed out waiting for the app" : "recv: \(String(cString: strerror(errno)))") }
             response.append(contentsOf: buffer[..<count])
