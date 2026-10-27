@@ -6,15 +6,20 @@ private final class RecordingControllerSession: ControllerSession, @unchecked Se
     var onMessage: (@Sendable (String, String?) -> Void)?
     private let lock = NSLock()
     private var values: [ControllerInput] = []
+    private var sent: [(ControllerInput, Double)] = []
     var onSend: ((ControllerInput) -> Void)?
     func send(_ value: ControllerInput) {
-        lock.lock(); values.append(value); let callback = onSend; lock.unlock()
+        lock.lock(); values.append(value); sent.append((value, ProcessInfo.processInfo.systemUptime)); let callback = onSend; lock.unlock()
         callback?(value)
     }
     func stop() {}
+    func timeline() -> [(ControllerInput, Double)] {
+        lock.lock(); defer { lock.unlock() }
+        return sent
+    }
     func drain() -> [ControllerInput] {
         lock.lock(); defer { lock.unlock() }
-        let result = values; values.removeAll(); return result
+        let result = values; values.removeAll(); sent.removeAll(); return result
     }
     func observe(_ callback: @escaping (ControllerInput) -> Void) {
         lock.lock(); onSend = callback; lock.unlock()
@@ -107,15 +112,54 @@ final class ControllerPipelineTests: XCTestCase {
         pipeline.setSession(nil)
     }
 
-    func testEveryAnalogChangeIsSentImmediately() {
+    private func localPipeline() -> (ControllerInputPipeline, UUID, RecordingControllerSession) {
         let pipeline = ControllerInputPipeline(heartbeat: false)
         let generation = pipeline.select(GCController.withExtendedGamepad(), remote: false)
         pipeline.setApplicationActive(true)
-        let session = RecordingControllerSession(); pipeline.setSession(session); _ = session.drain()
-        let sequence = [ControllerInput(lx: 0.25), ControllerInput(lx: 0.5), ControllerInput(lx: 1), ControllerInput(lx: 1, ry: -1)]
-        // No delayed work exists: all changes are sent before updateLocal returns.
-        pipeline.queue.sync { for value in sequence { pipeline.updateLocal(value, generation: generation) } }
-        XCTAssertEqual(session.drain(), sequence)
+        let session = RecordingControllerSession(); pipeline.setSession(session)
+        usleep(3000) // Leave the 2 ms window opened by the session's initial neutral send.
+        _ = session.drain()
+        return (pipeline, generation, session)
+    }
+
+    func testAnalogLeadingEdgeAndButtonsAreImmediate() {
+        let (pipeline, generation, session) = localPipeline()
+        pipeline.queue.sync { pipeline.updateLocal(ControllerInput(lx: 0.25), generation: generation) }
+        XCTAssertEqual(session.drain(), [ControllerInput(lx: 0.25)])
+        // A button edge inside the 2 ms window is never held back.
+        pipeline.queue.sync { pipeline.updateLocal(ControllerInput(buttons: ["A"], lx: 0.25), generation: generation) }
+        XCTAssertEqual(session.drain(), [ControllerInput(buttons: ["A"], lx: 0.25)])
+        pipeline.setSession(nil)
+    }
+
+    func testAnalogBurstCoalescesToTwoMillisecondBoundary() {
+        let (pipeline, generation, session) = localPipeline()
+        for i in 1...100 {
+            let value = ControllerInput(lx: Float(i) / 100)
+            pipeline.queue.sync { pipeline.updateLocal(value, generation: generation) }
+            usleep(200)
+        }
+        let finished = Date().addingTimeInterval(1)
+        while session.timeline().last?.0 != ControllerInput(lx: 1) && Date() < finished { usleep(1000) }
+        let sent = pipeline.queue.sync { session.timeline() }
+        XCTAssertEqual(sent.first?.0, ControllerInput(lx: 0.01))
+        XCTAssertEqual(sent.last?.0, ControllerInput(lx: 1))
+        XCTAssertLessThan(sent.count, 100)
+        for (previous, next) in zip(sent, sent.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(next.1 - previous.1, ControllerInputPipeline.analogInterval * 0.95)
+        }
+        pipeline.setSession(nil)
+    }
+
+    func testHeartbeatDoesNotDelayFollowingStickMove() {
+        let (pipeline, generation, session) = localPipeline()
+        pipeline.queue.sync { pipeline.updateLocal(ControllerInput(lx: 0.25), generation: generation) }
+        usleep(5000)
+        pipeline.queue.sync {
+            pipeline.tick(heartbeat: true)
+            pipeline.updateLocal(ControllerInput(lx: 0.5), generation: generation)
+        }
+        XCTAssertEqual(session.drain(), [ControllerInput(lx: 0.25), ControllerInput(lx: 0.25), ControllerInput(lx: 0.5)])
         pipeline.setSession(nil)
     }
 

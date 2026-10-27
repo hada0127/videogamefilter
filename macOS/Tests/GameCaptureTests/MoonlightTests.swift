@@ -29,9 +29,9 @@ final class MoonlightTests: XCTestCase {
     func testAckWireLayoutMatchesNativeVector() {
         let key = Data(repeating: 107, count: 32)
         let ack = UDPControllerTransport.ack(sequence: 42, key: key)
-        // Same vector as controller/native/test_protocol.c.
-        XCTAssertEqual(Array(ack.prefix(16)), [0,0,0,0,0,0,0,42,86,71,70,65,0xe3,0x8b,0x9b,0x11])
-        XCTAssertEqual(ack.count, 44); XCTAssertEqual(ack.last, 0x80)
+        // Same 44-byte vector as controller/native/test_protocol.c.
+        XCTAssertEqual(ack.map { String(format: "%02x", $0) }.joined(),
+                       "000000000000002a56474641e38b9b11208a053cbdee32caae1d44da5f0253a84a1059718a8f7474d32eb380")
         XCTAssertEqual(UDPControllerTransport.ackSequence(ack, key: key), 42)
         var forged = ack; forged[7] = 43
         XCTAssertNil(UDPControllerTransport.ackSequence(forged, key: key))
@@ -54,13 +54,16 @@ final class MoonlightTests: XCTestCase {
         // Old Pi: datagram consumed, nothing returned.
         try queue.sync { try transport.send(.neutral) }
         var packet = [UInt8](repeating: 0, count: 64), peer = sockaddr_in(), peerSize = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let received = withUnsafeMutablePointer(to: &peer) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.recvfrom(server, &packet, 64, 0, $0, &peerSize) } }
+        func readable() -> Bool { var p = pollfd(fd: server, events: Int16(POLLIN), revents: 0); return Darwin.poll(&p, 1, 2000) == 1 }
+        XCTAssertTrue(readable())
+        let received = withUnsafeMutablePointer(to: &peer) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.recvfrom(server, &packet, 64, MSG_DONTWAIT, $0, &peerSize) } }
         XCTAssertEqual(received, 56)
         usleep(20000); queue.sync { transport.readAcks() }
         XCTAssertTrue(queue.sync { transport.rttSamples.isEmpty })
         // New Pi: ack for sequence 2 plus a forged and a duplicate ack.
         try queue.sync { try transport.send(.neutral) }
-        XCTAssertEqual(Darwin.recv(server, &packet, 64, 0), 56)
+        XCTAssertTrue(readable())
+        XCTAssertEqual(Darwin.recv(server, &packet, 64, MSG_DONTWAIT), 56)
         let ack = UDPControllerTransport.ack(sequence: 2, key: key), forged = UDPControllerTransport.ack(sequence: 2, key: Data(repeating: 8, count: 32))
         for reply in [forged, ack, ack] {
             _ = reply.withUnsafeBytes { bytes in withUnsafePointer(to: &peer) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
