@@ -108,7 +108,9 @@ final class AgentControlServerTests: XCTestCase {
         let fake = FakeAgentHost()
         let gate = DispatchSemaphore(value: 0)
         fake.statusGate = gate
-        let server = try server(fake); defer { server.stop() }
+        let server = try server(fake)
+        // Always unblock the host queue, even if an assertion below throws.
+        defer { fake.lock.lock(); fake.statusGate = nil; fake.lock.unlock(); gate.signal(); server.stop() }
 
         // Three pipelined requests on one connection: only the first reaches the (blocked) host.
         let pipelined = connected(); defer { close(pipelined) }
@@ -148,15 +150,19 @@ final class AgentControlServerTests: XCTestCase {
     func testPipelinedFloodBeyondLineLimitIsCut() throws {
         let fake = FakeAgentHost()
         let gate = DispatchSemaphore(value: 0); fake.statusGate = gate
-        let server = try server(fake); defer { server.stop(); gate.signal() }
+        let server = try server(fake)
+        defer { fake.lock.lock(); fake.statusGate = nil; fake.lock.unlock(); gate.signal(); server.stop() }
         let fd = connected(); defer { close(fd) }
+        // The first request must reach the host before the flood closes the connection.
+        let first = statusLine("first")
+        _ = first.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
+        XCTAssertEqual(fake.statusEntered.wait(timeout: .now() + 3), .success)
         var flood = Data()
         while flood.count <= AgentProtocol.maxLineBytes + 1024 { flood.append(statusLine("x")) }
         _ = flood.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
         let lines = readLines(fd, count: 1)
         XCTAssertEqual(lines.first.flatMap { errorCode($0) }, "bad_request")
         XCTAssertEqual(fake.hostCalls, 1)
-        fake.lock.lock(); fake.statusGate = nil; fake.lock.unlock()
     }
 
     private func errorCode(_ response: [String: Any]) -> String? {

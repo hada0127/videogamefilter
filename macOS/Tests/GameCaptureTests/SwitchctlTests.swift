@@ -164,18 +164,25 @@ final class SwitchctlTests: XCTestCase {
             (#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, nil, nil),
             (#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#, nil, nil),
             (#"{"jsonrpc":"2.0","id":"ok","method":"ping"}"#, 0, "ok"),
+            // Large exact integer ids are valid and echoed unchanged (no argument-size limit).
+            (#"{"jsonrpc":"2.0","id":1000000000000000,"method":"ping"}"#, 0, 1_000_000_000_000_000),
+            (#"{"jsonrpc":"2.0","id":-1000000000000000,"method":"ping"}"#, 0, -1_000_000_000_000_000),
+            (#"{"jsonrpc":"2.0","id":9007199254740991,"method":"ping"}"#, 0, 9_007_199_254_740_991),
+            (#"{"jsonrpc":"2.0","id":0,"method":"ping"}"#, 0, 0),
         ]
         let result = try run(["mcp"], stdin: cases.map(\.line).joined(separator: "\n") + "\n")
         XCTAssertEqual(result.code, 0)
         let expected = cases.filter { $0.code != nil }
         XCTAssertEqual(result.lines.count, expected.count)
         for (line, want) in zip(result.lines, expected) {
-            if want.code == 0 { XCTAssertNotNil(line["result"], want.line); XCTAssertEqual(line["id"] as? String, "ok"); continue }
-            XCTAssertEqual((line["error"] as? [String: Any])?["code"] as? Int, want.code, want.line)
+            if want.code == 0 { XCTAssertNotNil(line["result"], want.line); XCTAssertNil(line["error"], want.line) }
+            else { XCTAssertEqual((line["error"] as? [String: Any])?["code"] as? Int, want.code, want.line) }
             switch want.id {
             case nil: XCTAssertTrue(line["id"] is NSNull, want.line)
             case let id as String: XCTAssertEqual(line["id"] as? String, id, want.line)
-            case let id as Int: XCTAssertEqual(line["id"] as? Int, id, want.line)
+            case let id as Int:
+                XCTAssertEqual(line["id"] as? Int, id, want.line)
+                XCTAssertFalse((line["id"] as? NSNumber).map { CFNumberIsFloatType($0) } ?? true, want.line)
             default: XCTFail(want.line)
             }
         }

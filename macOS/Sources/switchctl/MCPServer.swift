@@ -42,10 +42,14 @@ struct MCPServer {
         }
     }
 
-    /// MCP ids are strings or integers (never null).
+    /// MCP ids are strings or integers (never null, boolean or fractional). Unlike tool arguments,
+    /// ids have no size limit beyond being an exact integer; they are echoed back unchanged.
     static func validID(_ value: Any) -> Bool {
         if value is String { return true }
-        return AgentJSON.integer(value) != nil
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
+        if !CFNumberIsFloatType(number) { return true }
+        let double = number.doubleValue
+        return double.isFinite && double == double.rounded() && abs(double) <= 9_007_199_254_740_992
     }
 
     /// Returns nil only for a valid notification.
