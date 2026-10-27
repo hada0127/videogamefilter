@@ -3,6 +3,10 @@ import AVFoundation
 
 @MainActor final class CaptureModel: ObservableObject {
     let engine = CaptureEngine()
+    /// Newest raw frame for agent snapshots; filled on the capture frame queue.
+    let frameTap = FrameTap()
+    /// Last measured capture size and rate, for agent status.
+    private(set) var frameInfo: (width: Int, height: Int, fps: Double)?
     let renderer: VideoRenderer?
     @Published var rendererError: String?
     @Published var videos: [AVCaptureDevice] = []
@@ -30,12 +34,13 @@ import AVFoundation
         renderer?.onError = { [weak self] message in
             DispatchQueue.main.async { self?.rendererError = message }
         }
-        engine.onVideoFrame = { [renderer] frame in renderer?.submit(frame) }
+        engine.onVideoFrame = { [renderer, frameTap] frame in frameTap.store(frame); renderer?.submit(frame) }
         engine.onFrames = { [weak self] width, height, rate in
             DispatchQueue.main.async {
                 guard let self, self.running else { return }
                 self.lastFrame = Date()
                 self.hasFrames = true
+                self.frameInfo = (Int(width), Int(height), rate)
                 self.measured = "캡처 \(width) × \(height) · \(String(format: "%.1f", rate)) fps"
             }
         }
@@ -134,8 +139,11 @@ import AVFoundation
     func stop(message: String = "캡처가 중지됐습니다", restart: Bool = false) {
         generation += 1
         let request = generation
-        running = false; hasFrames = false; measured = ""; busy = true
+        running = false; hasFrames = false; measured = ""; busy = true; frameInfo = nil
+        frameTap.clear()
         engine.stop { [weak self] in
+            // Frames queued before the session stopped may have refilled the tap.
+            self?.frameTap.clear()
             guard let self, self.generation == request else { return }
             self.busy = false; self.status = message
             if restart { self.start() }
