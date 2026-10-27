@@ -7,7 +7,9 @@ protocol ControllerSession: AnyObject {
     var onMessage: (@Sendable (String, String?) -> Void)? { get set }
     func send(_ value: ControllerInput)
     func stop()
+    func transportMetrics() -> TransportMetrics?
 }
+extension ControllerSession { func transportMetrics() -> TransportMetrics? { nil } }
 extension SSHControllerBridge: ControllerSession {}
 
 /// TLS authenticates and owns the session. Gameplay packets use UDP only.
@@ -147,6 +149,14 @@ final class PiControlBridge: ControllerSession, @unchecked Sendable {
         buffer = Data()
     }
     func stop() { queue.async { [self] in finish() } }
+    /// Never call from `queue`.
+    func transportMetrics() -> TransportMetrics? {
+        queue.sync {
+            guard active else { return nil }
+            if let udp { return udp.metrics }
+            return connection == nil ? nil : TransportMetrics(kind: "tls", rtt: nil)
+        }
+    }
 }
 
 /// Preserve button edges during a burst; only redundant axis/heartbeat states coalesce.

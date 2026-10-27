@@ -3,6 +3,10 @@ import CryptoKit
 import Darwin
 import OSLog
 
+/// RTT percentiles in milliseconds; `windowEndUptime` is `ProcessInfo.systemUptime` seconds.
+struct RTTWindow: Equatable { let samples: Int; let p50Ms, p99Ms, maxMs: Double; let windowEndUptime: Double }
+struct TransportMetrics: Equatable { let kind: String; let rtt: RTTWindow? }
+
 /// Per-SSH-session authenticated datagrams: uint64 sequence, JSON state, SHA256 HMAC.
 /// Newer Pis answer each datagram with an authenticated ack used only to log RTT.
 final class UDPControllerTransport {
@@ -15,6 +19,9 @@ final class UDPControllerTransport {
     private var sentAt = [(sequence: UInt64, time: Double)](repeating: (0, 0), count: 1024)
     private(set) var rttSamples: [Double] = []
     private var lastRTTLog = ProcessInfo.processInfo.systemUptime
+    private var lastWindow: RTTWindow?
+    /// Internal for tests.
+    var rttWindowSeconds = 5.0
     private let logger = Logger(subsystem: "net.tarucy.videogamefilter.native", category: "ControllerInput")
     static func packet(payload: Data, sequence: UInt64, key: Data) -> Data {
         var number = sequence.bigEndian
@@ -87,11 +94,21 @@ final class UDPControllerTransport {
             if rttSamples.count < 4096 { rttSamples.append(arrived - sentAt[slot].time) }
         }
         let now = ProcessInfo.processInfo.systemUptime
-        if now - lastRTTLog >= 5, let rtt = Self.rttSummary(rttSamples) {
+        if now - lastRTTLog >= rttWindowSeconds, let rtt = Self.rttSummary(rttSamples) {
             lastRTTLog = now
+            lastWindow = RTTWindow(samples: rttSamples.count, p50Ms: rtt.p50, p99Ms: rtt.p99, maxMs: rtt.max, windowEndUptime: now)
             logger.info("Input RTT: samples=\(self.rttSamples.count), p50_ms=\(rtt.p50), p99_ms=\(rtt.p99), max_ms=\(rtt.max)")
             rttSamples.removeAll(keepingCapacity: true)
         }
+    }
+    /// The last completed 5 s window, else the current partial one. Call on the ack queue.
+    var metrics: TransportMetrics {
+        var rtt = lastWindow
+        if rtt == nil, let partial = Self.rttSummary(rttSamples) {
+            rtt = RTTWindow(samples: rttSamples.count, p50Ms: partial.p50, p99Ms: partial.p99, maxMs: partial.max,
+                            windowEndUptime: ProcessInfo.processInfo.systemUptime)
+        }
+        return TransportMetrics(kind: version == 2 ? "udp-v2" : "udp-v1", rtt: rtt)
     }
     func send(_ value: ControllerInput) throws {
         try send(version == 2 ? Self.binaryInputPayload(value) : JSONEncoder().encode(value))

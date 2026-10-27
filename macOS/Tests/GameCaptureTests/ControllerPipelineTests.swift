@@ -2,7 +2,7 @@ import XCTest
 import GameController
 @testable import GameCapture
 
-private final class RecordingControllerSession: ControllerSession, @unchecked Sendable {
+final class RecordingControllerSession: ControllerSession, @unchecked Sendable {
     var onMessage: (@Sendable (String, String?) -> Void)?
     private let lock = NSLock()
     private var values: [ControllerInput] = []
