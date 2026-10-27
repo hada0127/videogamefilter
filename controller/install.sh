@@ -72,8 +72,12 @@ After=network-online.target bluetooth.service avahi-daemon.service vgf-usb-gadge
 Type=simple
 ExecStartPre=/usr/sbin/rfkill unblock bluetooth
 ExecStartPre=-/usr/sbin/iw dev wlan0 set power_save off
+# ondemand ramps up only after load; input bursts are too short for that.
+ExecStartPre=-/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$$g" ] && echo performance > "$$g"; done; true'
 ExecStart=/opt/videogamefilter-controller/native/vgf-controller
 Nice=-5
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=50
 Restart=on-failure
 RestartSec=3
 KillMode=control-group

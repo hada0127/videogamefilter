@@ -116,7 +116,7 @@ final class PiControlBridge: ControllerSession, @unchecked Sendable {
                 guard udp == nil, let version = message["version"] as? Int, (1...2).contains(version),
                       let port = message["port"] as? Int, let encoded = message["key"] as? String,
                       let key = Data(base64Encoded: encoded) else { fail("UDP 연결 정보 오류"); return }
-                do { udp = try UDPControllerTransport(host: host, port: port, key: key, version: version); flush() }
+                do { udp = try UDPControllerTransport(host: host, port: port, key: key, version: version, queue: queue); flush() }
                 catch { fail(error.localizedDescription); return }
             case "status":
                 guard let state = message["state"] as? String else { continue }

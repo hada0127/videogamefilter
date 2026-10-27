@@ -21,6 +21,8 @@ int main(void){
     assert(vgf_decode(p,56,key,&seq,&v)<0);seq=0;p[12]^=1;assert(vgf_decode(p,56,key,&seq,&v)<0&&seq==0);p[12]^=1;
     for(size_t n=0;n<56;n++)assert(vgf_decode(p,n,key,&seq,&v)<0);
     p[15]=0x80;sign_packet(p,key);assert(vgf_decode(p,56,key,&seq,&v)<0);p[15]=0;sign_packet(p,key);
+    uint8_t ack[VGF_ACK_SIZE];vgf_ack(key,42,ack);const uint8_t ack_head[]={0,0,0,0,0,0,0,42,'V','G','F','A',0xe3,0x8b,0x9b,0x11};
+    assert(!memcmp(ack,ack_head,sizeof(ack_head))&&ack[43]==0x80); /* Shared vector with Swift's ackSequence test. */
     vgf_protocol proto={.address={1,2,3,4,5,6}};uint8_t r[50],in[50]={0xa2,1};
     assert(vgf_report_interval(&proto,0)==.066);assert(vgf_report_interval(&proto,1)==.008);
     proto.vibration=true;assert(vgf_report_interval(&proto,0)==.066);proto.player=1;assert(vgf_report_interval(&proto,0)==.015);
@@ -36,7 +38,7 @@ int main(void){
     for(int i=0;i<10000;i++){seq=0;clock_gettime(CLOCK_MONOTONIC,&start);assert(vgf_decode(p,56,key,&seq,&v)==0);vgf_report(&proto,&v,NULL,0,100+i*.008,r);clock_gettime(CLOCK_MONOTONIC,&end);samples[i]=(end.tv_sec-start.tv_sec)*1e6+(end.tv_nsec-start.tv_nsec)/1e3;}
     /* Insertion sort only after measurement. */
     for(int i=1;i<10000;i++){double x=samples[i];int j=i;while(j&&samples[j-1]>x){samples[j]=samples[j-1];j--;}samples[j]=x;}
-    printf("PASS protocol, HMAC/replay, chords, hold/release, bounded queue, SPI bounds, USB report\n");
+    printf("PASS protocol, HMAC/replay, ack vector, chords, hold/release, bounded queue, SPI bounds, USB report\n");
     printf("decode+BT report CPU time us: p50=%.2f p95=%.2f p99=%.2f max=%.2f (10000 samples; excludes network/USB/BT delivery)\n",samples[5000],samples[9500],samples[9900],samples[9999]);
     return 0;
 }

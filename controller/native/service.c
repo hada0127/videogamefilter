@@ -111,12 +111,17 @@ static void hid_release(int fd,int usb,vgf_protocol *protocol){
 static void session(SSL *ssl,int tcp,int pair){
     int lock=open("/run/videogamefilter-controller.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600),udp=-1;
     vgf_bt bt={.ctrl=-1,.itr=-1,.listen_ctrl=-1,.listen_itr=-1};vgf_queue queue={0};vgf_protocol protocol={0};unsigned char key[32]={0};
-    uint64_t sequence=0,accepted=0,invalid=0,reports=0,blocked=0;double max_gap=0,last_sent=0;int connected=0,use_usb=0,listening=0;
+    uint64_t sequence=0,accepted=0,invalid=0,reports=0,blocked=0,udp_gaps=0;double max_gap=0,last_sent=0,max_udp_gap=0,last_udp=0;int connected=0,use_usb=0,listening=0;
     if(lock<0||flock(lock,LOCK_EX|LOCK_NB)<0){send_blocking(ssl,"{\"type\":\"error\",\"message\":\"다른 컨트롤러 연결이 사용 중입니다.\"}\n");goto done;}
     if(send_blocking(ssl,"{\"type\":\"status\",\"state\":\"starting\",\"wake\":false}\n"))goto done;
-    if(!pair && (bt.itr=vgf_usb_open())>=0){use_usb=1;connected=1;}
+    if(!pair && (bt.itr=vgf_usb_open())>=0){use_usb=1;connected=1;
+        /* USB needs no radio. An idle BT controller still takes coexistence airtime from Wi-Fi. */
+        int r=vgf_bt_rfkill(1);if(r<0)fprintf(stderr,"Bluetooth rfkill block failed: %s\n",strerror(errno));else if(r)fputs("Bluetooth radio blocked for USB session\n",stderr);}
     else {
-        if(vgf_bt_setup(&bt,sdp)){send_blocking(ssl,"{\"type\":\"error\",\"message\":\"블루투스 초기화 실패\"}\n");goto done;}
+        int unblocked=vgf_bt_rfkill(0);if(unblocked<0)fprintf(stderr,"Bluetooth rfkill unblock failed: %s\n",strerror(errno));
+        /* bluetoothd observes the unblock asynchronously; Powered may briefly report Blocked. */
+        for(int retry=0;vgf_bt_setup(&bt,sdp);retry++){vgf_bt_close(&bt);
+            if(unblocked<=0||retry==4){send_blocking(ssl,"{\"type\":\"error\",\"message\":\"블루투스 초기화 실패\"}\n");goto done;}usleep(250000);}
         char address[18];listening=pair||console_address(address)||vgf_bt_connect(&bt,address);
         if(listening&&vgf_bt_listen(&bt))goto done;
         char own[18];ba2str(&bt.local,own);for(int i=0;i<6;i++){unsigned n=0;sscanf(own+i*3,"%2x",&n);protocol.address[i]=(uint8_t)n;}
@@ -129,6 +134,7 @@ static void session(SSL *ssl,int tcp,int pair){
     double started=now_s(),next_report=started,next_status=started,last_input=started,out_started=0,next_usb_check=0;
     char output[512]={0};size_t output_len=0,output_at=0;int output_want_read=0;
     uint8_t pending_report[50];double report_started=0;int have_report=0;vgf_input current={0};
+    struct {uint64_t sequence;struct sockaddr_in to;} acks[64];unsigned ack_count=0;
     while(!stopping){
         double now=now_s();
         struct pollfd fds[5]={{tcp,POLLIN,0},{udp,POLLIN,0},{bt.ctrl,POLLIN,0},{bt.itr,POLLIN,0},{-1,0,0}};
@@ -145,9 +151,11 @@ static void session(SSL *ssl,int tcp,int pair){
             char junk[1024];int n=SSL_read(ssl,junk,sizeof(junk));if(n<=0){int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;}
         }
         if(fds[1].revents&POLLIN){
-            for(int i=0;i<64;i++){uint8_t data[57];ssize_t n=recv(udp,data,sizeof(data),0);if(n<0){if(errno==EAGAIN||errno==EWOULDBLOCK)break;goto done;}
+            for(int i=0;i<64;i++){uint8_t data[57];struct sockaddr_in from;socklen_t fromlen=sizeof(from);ssize_t n=recvfrom(udp,data,sizeof(data),0,(struct sockaddr*)&from,&fromlen);if(n<0){if(errno==EAGAIN||errno==EWOULDBLOCK)break;goto done;}
                 vgf_input v;if(vgf_decode(data,(size_t)n,key,&sequence,&v)){invalid++;continue;}
-                vgf_enqueue(&queue,&v,now_s());last_input=now_s();accepted++;
+                double arrived=now_s();if(last_udp>0){double gap=arrived-last_udp;if(gap>max_udp_gap)max_udp_gap=gap;if(gap>.04)udp_gaps++;}last_udp=arrived;
+                vgf_enqueue(&queue,&v,arrived);last_input=arrived;accepted++;
+                if(fromlen==sizeof(from)&&from.sin_family==AF_INET){acks[ack_count].sequence=sequence;acks[ack_count].to=from;ack_count++;}
                 if(use_usb||(protocol.vibration&&protocol.player)){double due=fmax(now,last_sent+(use_usb?.001:.004));if(due<next_report)next_report=due;}
             }
         }
@@ -184,6 +192,9 @@ static void session(SSL *ssl,int tcp,int pair){
             }
             if(now-last_input>10)break;
         }
+        /* Acks follow the HID write so RTT measurement never delays the report. Old apps never read them. */
+        for(unsigned i=0;i<ack_count;i++){uint8_t ack[VGF_ACK_SIZE];vgf_ack(key,acks[i].sequence,ack);(void)sendto(udp,ack,sizeof(ack),MSG_DONTWAIT,(struct sockaddr*)&acks[i].to,sizeof(acks[i].to));}
+        ack_count=0;
         if(now>=next_status&&!output_len){status_line(output,sizeof(output),connected?"connected":(listening?"connecting":"reconnecting"),use_usb);output_len=strlen(output);output_at=0;out_started=now;next_status=now+.5;}
         if(output_len){int n=SSL_write(ssl,output+output_at,(int)(output_len-output_at));if(n>0){output_at+=(size_t)n;output_want_read=0;if(output_at==output_len)output_at=output_len=0;}
             else {int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;output_want_read=e==SSL_ERROR_WANT_READ;}
@@ -192,7 +203,7 @@ static void session(SSL *ssl,int tcp,int pair){
     }
  done:
     if(connected&&bt.itr>=0)hid_release(bt.itr,use_usb,&protocol);
-    fprintf(stderr,"session end: input=%llu invalid=%llu reports=%llu blocked=%llu max_report_gap_ms=%.2f dropped_edges=%llu\n",(unsigned long long)accepted,(unsigned long long)invalid,(unsigned long long)reports,(unsigned long long)blocked,max_gap*1000,(unsigned long long)queue.discarded);
+    fprintf(stderr,"session end: input=%llu invalid=%llu reports=%llu blocked=%llu max_report_gap_ms=%.2f dropped_edges=%llu max_udp_gap_ms=%.2f udp_gaps_over_40ms=%llu\n",(unsigned long long)accepted,(unsigned long long)invalid,(unsigned long long)reports,(unsigned long long)blocked,max_gap*1000,(unsigned long long)queue.discarded,max_udp_gap*1000,(unsigned long long)udp_gaps);
     vgf_bt_close(&bt);if(udp>=0)close(udp);OPENSSL_cleanse(key,32);if(lock>=0)close(lock);
 }
 static void client(SSL_CTX *ctx,int fd){

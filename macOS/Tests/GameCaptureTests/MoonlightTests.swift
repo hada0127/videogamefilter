@@ -26,6 +26,53 @@ final class MoonlightTests: XCTestCase {
         XCTAssertEqual(data.count, 56)
         XCTAssertEqual(data.prefix(8), Data([0,0,0,0,0,0,0,42]))
     }
+    func testAckWireLayoutMatchesNativeVector() {
+        let key = Data(repeating: 107, count: 32)
+        let ack = UDPControllerTransport.ack(sequence: 42, key: key)
+        // Same vector as controller/native/test_protocol.c.
+        XCTAssertEqual(Array(ack.prefix(16)), [0,0,0,0,0,0,0,42,86,71,70,65,0xe3,0x8b,0x9b,0x11])
+        XCTAssertEqual(ack.count, 44); XCTAssertEqual(ack.last, 0x80)
+        XCTAssertEqual(UDPControllerTransport.ackSequence(ack, key: key), 42)
+        var forged = ack; forged[7] = 43
+        XCTAssertNil(UDPControllerTransport.ackSequence(forged, key: key))
+        XCTAssertNil(UDPControllerTransport.ackSequence(ack, key: Data(repeating: 1, count: 32)))
+        XCTAssertNil(UDPControllerTransport.ackSequence(ack.prefix(43), key: key))
+        let summary = UDPControllerTransport.rttSummary((1...100).map { Double($0) / 1000 })
+        XCTAssertEqual(summary?.p50, 50); XCTAssertEqual(summary?.p99, 99); XCTAssertEqual(summary?.max, 100)
+        XCTAssertNil(UDPControllerTransport.rttSummary([]))
+    }
+    func testAcknowledgedDatagramsProduceRTTAndSilentPeerDoesNot() throws {
+        let server = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP); XCTAssertGreaterThanOrEqual(server, 0)
+        defer { Darwin.close(server) }
+        var address = sockaddr_in(); address.sin_family = sa_family_t(AF_INET); address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var size = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.bind(server, $0, size) == 0 && Darwin.getsockname(server, $0, &size) == 0 } }
+        XCTAssertTrue(bound)
+        let key = Data(repeating: 7, count: 32), queue = DispatchQueue(label: "test.udp.ack")
+        let transport = try UDPControllerTransport(host: "127.0.0.1", port: Int(UInt16(bigEndian: address.sin_port)), key: key, version: 2, queue: queue)
+        // Old Pi: datagram consumed, nothing returned.
+        try queue.sync { try transport.send(.neutral) }
+        var packet = [UInt8](repeating: 0, count: 64), peer = sockaddr_in(), peerSize = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let received = withUnsafeMutablePointer(to: &peer) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.recvfrom(server, &packet, 64, 0, $0, &peerSize) } }
+        XCTAssertEqual(received, 56)
+        usleep(20000); queue.sync { transport.readAcks() }
+        XCTAssertTrue(queue.sync { transport.rttSamples.isEmpty })
+        // New Pi: ack for sequence 2 plus a forged and a duplicate ack.
+        try queue.sync { try transport.send(.neutral) }
+        XCTAssertEqual(Darwin.recv(server, &packet, 64, 0), 56)
+        let ack = UDPControllerTransport.ack(sequence: 2, key: key), forged = UDPControllerTransport.ack(sequence: 2, key: Data(repeating: 8, count: 32))
+        for reply in [forged, ack, ack] {
+            _ = reply.withUnsafeBytes { bytes in withUnsafePointer(to: &peer) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.sendto(server, bytes.baseAddress, bytes.count, 0, $0, peerSize) } } }
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while queue.sync(execute: { transport.rttSamples.isEmpty }) && Date() < deadline { usleep(1000) }
+        usleep(20000)
+        let samples = queue.sync { transport.rttSamples }
+        XCTAssertEqual(samples.count, 1)
+        XCTAssertTrue(samples.allSatisfy { $0 >= 0 && $0 < 2 })
+    }
     func testNetworkBurstKeepsButtonEdgesButCoalescesAxes() {
         var q = ControllerTransitionBuffer()
         let a = packet(buttons: 0x1000).input(swap: false)

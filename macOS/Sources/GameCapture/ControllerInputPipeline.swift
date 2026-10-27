@@ -16,8 +16,6 @@ final class ControllerInputPipeline: @unchecked Sendable {
     private var session: ControllerSession?
     private var pulse: (buttons: [String], until: Double)?
     private var lastSent: ControllerInput?
-    private var lastSendTime = 0.0
-    private var axisWork: DispatchWorkItem?
     private var timer: DispatchSourceTimer?
     private let displayLock = NSLock()
     private var displayed = ControllerInput.neutral
@@ -45,7 +43,7 @@ final class ControllerInputPipeline: @unchecked Sendable {
             self.timer = timer; timer.resume()
         }
     }
-    deinit { timer?.cancel(); axisWork?.cancel() }
+    deinit { timer?.cancel() }
 
     @discardableResult
     func select(_ selected: GCController?, remote: Bool, reset: Bool = false) -> UUID {
@@ -54,7 +52,7 @@ final class ControllerInputPipeline: @unchecked Sendable {
             controller?.extendedGamepad?.valueChangedHandler = nil
             source = UUID(); controller = selected; self.remote = remote
             local = .neutral; moonlight = MoonlightState(); pulse = nil
-            axisWork?.cancel(); axisWork = nil; lastSent = nil; receivedAt = nil
+            lastSent = nil; receivedAt = nil
             session?.send(.neutral)
             if let selected, let pad = selected.extendedGamepad {
                 // The profile is mutable only on handlerQueue. Snapshot it here,
@@ -106,7 +104,6 @@ final class ControllerInputPipeline: @unchecked Sendable {
         queue.sync {
             session?.send(.neutral)
             session = value; lastSent = nil; pulse = nil; receivedAt = nil
-            axisWork?.cancel(); axisWork = nil
             value?.send(.neutral)
             tick()
         }
@@ -130,19 +127,10 @@ final class ControllerInputPipeline: @unchecked Sendable {
         }
         value.buttons.sort()
         displayLock.lock(); displayed = value; displayLock.unlock()
+        // Every changed state goes out immediately, analog included; the heartbeat repairs loss.
         guard let session, heartbeat || lastSent != value else { return }
-        if !heartbeat && lastSent?.buttons == value.buttons && now - lastSendTime < 0.008 {
-            if axisWork == nil {
-                let work = DispatchWorkItem { [weak self] in
-                    self?.axisWork = nil; self?.tick()
-                }
-                axisWork = work
-                queue.asyncAfter(deadline: .now() + (0.008 - (now - lastSendTime)), execute: work)
-            }
-            return
-        }
         let changed = lastSent != value
-        lastSent = value; lastSendTime = now
+        lastSent = value
         session.send(value)
         if changed, let receivedAt {
             let forwarded = ProcessInfo.processInfo.systemUptime

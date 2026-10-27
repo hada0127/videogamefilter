@@ -107,7 +107,19 @@ final class ControllerPipelineTests: XCTestCase {
         pipeline.setSession(nil)
     }
 
-    @MainActor func testPulseReleasesAndAxesCoalesceWhileMainThreadIsBlocked() {
+    func testEveryAnalogChangeIsSentImmediately() {
+        let pipeline = ControllerInputPipeline(heartbeat: false)
+        let generation = pipeline.select(GCController.withExtendedGamepad(), remote: false)
+        pipeline.setApplicationActive(true)
+        let session = RecordingControllerSession(); pipeline.setSession(session); _ = session.drain()
+        let sequence = [ControllerInput(lx: 0.25), ControllerInput(lx: 0.5), ControllerInput(lx: 1), ControllerInput(lx: 1, ry: -1)]
+        // No delayed work exists: all changes are sent before updateLocal returns.
+        pipeline.queue.sync { for value in sequence { pipeline.updateLocal(value, generation: generation) } }
+        XCTAssertEqual(session.drain(), sequence)
+        pipeline.setSession(nil)
+    }
+
+    @MainActor func testPulseReleasesAndAxesArriveWhileMainThreadIsBlocked() {
         let pipeline = ControllerInputPipeline()
         let generation = pipeline.select(GCController.withExtendedGamepad(), remote: false)
         pipeline.setApplicationActive(true)
