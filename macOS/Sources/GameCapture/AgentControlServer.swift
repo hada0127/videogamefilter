@@ -27,6 +27,9 @@ final class AgentControlServer: @unchecked Sendable {
         }
     }
     static let maxClients = 4
+    /// Host work (status/input/release/snapshot) not yet finished, across all connections.
+    /// A slot is returned only when the work has run, never merely because a client left.
+    static let maxPendingHostTasks = 8
     static let idleSeconds = 30.0
     static let keptSnapshots = 20
 
@@ -39,17 +42,30 @@ final class AgentControlServer: @unchecked Sendable {
     private var acceptSource: DispatchSourceRead?
     private var clients: [ObjectIdentifier: Client] = [:]
     private var encoding = false
+    private var pendingHostTasks = 0
     private var bound = false
     private let logger = Logger(subsystem: "net.tarucy.videogamefilter.native", category: "AgentControl")
 
+    /// Server-queue state, except `closed`, which the host queue also reads.
     private final class Client {
         let fd: Int32
         var source: DispatchSourceRead?
         var idle: DispatchSourceTimer?
         var buffer = Data()
-        var closed = false
+        /// One request at a time per connection: later lines wait in `buffer` (bounded by the
+        /// line limit) until this response is written. Reading continues so a hang-up is noticed.
+        var inFlight = false
+        private let lock = NSLock()
+        private var isClosed = false
+        var closed: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return isClosed }
+            set { lock.lock(); isClosed = newValue; lock.unlock() }
+        }
         init(fd: Int32) { self.fd = fd }
     }
+
+    /// Internal for tests.
+    var pendingHostTaskCount: Int { queue.sync { pendingHostTasks } }
 
     init(socketPath: String = AgentProtocol.defaultSocketPath, snapshotDirectory: URL = AgentProtocol.defaultSnapshotDirectory,
          host: AgentControlHost, hostQueue: DispatchQueue = .main) {
@@ -167,13 +183,37 @@ final class AgentControlServer: @unchecked Sendable {
         guard count > 0 else { return }
         resetIdle(client)
         client.buffer.append(contentsOf: chunk[..<count])
-        while !client.closed, let end = client.buffer.firstIndex(of: 10) {
+        drain(client)
+    }
+
+    /// Handles buffered lines until one needs host work; the rest wait for its response.
+    private func drain(_ client: Client) {
+        while !client.closed, !client.inFlight, let end = client.buffer.firstIndex(of: 10) {
             let line = client.buffer[client.buffer.startIndex..<end]
             client.buffer.removeSubrange(...end)
             guard line.count <= AgentProtocol.maxLineBytes else { tooLong(client); return }
             handle(Data(line), client: client)
         }
-        if client.buffer.count > AgentProtocol.maxLineBytes { tooLong(client) }
+        // Unprocessed bytes stay within one line's worth, including requests pipelined behind one in flight.
+        if !client.closed, client.buffer.count > AgentProtocol.maxLineBytes { tooLong(client) }
+    }
+
+    /// Reserves a host slot for `client`, or answers busy.
+    private func begin(_ client: Client, id: Any?) -> Bool {
+        guard pendingHostTasks < Self.maxPendingHostTasks else {
+            reply(client, id: id, .failure(AgentError(.busy, "too many pending agent requests"))); return false
+        }
+        pendingHostTasks += 1
+        client.inFlight = true
+        return true
+    }
+
+    /// Runs on `queue` once the host work has finished: frees the slot, answers, handles the next line.
+    private func finish(_ client: Client, id: Any?, _ result: Result<[String: Any], AgentError>) {
+        pendingHostTasks -= 1
+        reply(client, id: id, result)
+        client.inFlight = false
+        drain(client)
     }
 
     private func tooLong(_ client: Client) {
@@ -199,11 +239,13 @@ final class AgentControlServer: @unchecked Sendable {
         }
     }
 
-    /// Runs `body` on the host queue and replies on the server queue.
+    /// Runs `body` on the host queue and replies on the server queue. Work for a connection
+    /// that has already closed is skipped, so an abandoned request never acts late.
     private func onHost(_ client: Client, id: Any?, _ body: @escaping () -> Result<[String: Any], AgentError>) {
-        hostQueue.async { [weak self] in
-            let result = Box(body())
-            self?.queue.async { [weak self] in self?.reply(client, id: id, result.value) }
+        guard begin(client, id: id) else { return }
+        hostQueue.async { [self] in
+            let result = Box(client.closed ? .failure(AgentError(.internal, "client disconnected")) : body())
+            queue.async { [self] in finish(client, id: id, result.value) }
         }
     }
 
@@ -250,19 +292,20 @@ final class AgentControlServer: @unchecked Sendable {
 
     private func snapshot(_ client: Client, id: Any?, maxWidth: Int) {
         guard !encoding else { reply(client, id: id, .failure(AgentError(.busy, "a snapshot is already being encoded"))); return }
+        guard begin(client, id: id) else { return }
         encoding = true
         let host = host, directory = snapshotDirectory
-        hostQueue.async { [weak self] in
-            let frame = Box(host.frame())
-            guard let self else { return }
-            self.encodeQueue.async { [weak self] in
+        hostQueue.async { [self] in
+            let frame = Box(client.closed ? .failure(AgentError(.internal, "client disconnected")) : host.frame())
+            encodeQueue.async { [self] in
                 let result: Result<[String: Any], AgentError>
                 switch frame.value {
                 case .failure(let error): result = .failure(error)
                 case .success(let frame):
                     do {
                         let png = try FrameTap.png(frame.buffer, maxWidth: maxWidth)
-                        let url = directory.appendingPathComponent("snap-\(frame.seq).png")
+                        // Unique per request: a later request for the same frame never replaces a returned file.
+                        let url = directory.appendingPathComponent("snap-\(frame.seq)-\(png.width)-\(UUID().uuidString.prefix(8).lowercased()).png")
                         try Self.writePrivate(png.data, to: url)
                         Self.prune(directory)
                         let now = ProcessInfo.processInfo.systemUptime
@@ -273,9 +316,9 @@ final class AgentControlServer: @unchecked Sendable {
                     }
                 }
                 let boxed = Box(result)
-                self?.queue.async { [weak self] in
-                    self?.encoding = false
-                    self?.reply(client, id: id, boxed.value)
+                queue.async { [self] in
+                    encoding = false
+                    finish(client, id: id, boxed.value)
                 }
             }
         }

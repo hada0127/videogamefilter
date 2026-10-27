@@ -86,6 +86,12 @@ func run(_ arguments: [String]) -> Outcome {
                 guard AgentProtocol.snapshotWidthRange.contains(value) else { throw UsageError(message: "--max-width must be in 320...3840") }
                 width = value
             }
+            if let out = options.values["out"] {
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: out, isDirectory: &isDirectory), isDirectory.boolValue {
+                    throw UsageError(message: "--out must be a file path, not a directory")
+                }
+            }
             return commands.snapshot(maxWidth: width, out: options.values["out"])
         case "press", "input":
             let options = try Options(rest, valued: ["hold-ms", "gap-ms", "buttons", "lx", "ly", "rx", "ry"], booleans: ["no-wait"])

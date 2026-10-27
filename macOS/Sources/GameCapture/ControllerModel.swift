@@ -17,7 +17,8 @@ import AgentControlProtocol
     static let moonlightID = "moonlight"
     @Published private(set) var moonlightError = ""
     private var moonlight: MoonlightReceiver?
-    private let inputPipeline = ControllerInputPipeline()
+    /// Internal for tests.
+    let inputPipeline = ControllerInputPipeline()
     private var inputGeneration = UUID()
     private var allowAutomaticInput = true
     private let discovery = PiDiscovery()
@@ -141,8 +142,7 @@ import AgentControlProtocol
                     self.logger.notice("Pi state: \(state, privacy: .public)")
                     if let message { self.logger.error("Pi connection detail: \(message, privacy: .public)") }
                 }
-                self.connected = state == "connected"
-                self.backend = self.connected ? message : nil
+                self.setLinkConnected(state == "connected", backend: message)
                 if self.connected { self.pairingRequested = false }
                 if state == "error" {
                     self.disconnect(manual: false); self.status = "다시 연결 대기 중"; self.detail = message ?? ""
@@ -160,6 +160,13 @@ import AgentControlProtocol
         }
         transport.send(.neutral); transport.start(device: device, endpoint: endpoint, pair: pairingRequested)
         inputPipeline.setSession(transport)
+    }
+    /// Any connected → not-connected transition drops the agent hold (neutral edge), so a
+    /// reconnect on the same session can never resume an old agent input.
+    func setLinkConnected(_ value: Bool, backend: String?) {
+        if connected && !value { inputPipeline.clearAgent() }
+        connected = value
+        self.backend = value ? backend : nil
     }
     func disconnect(manual: Bool = true) {
         if manual { pairingRequested = false; automatic = false }

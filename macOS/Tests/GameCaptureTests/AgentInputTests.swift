@@ -1,6 +1,7 @@
 import XCTest
 import Darwin
 import GameController
+import AgentControlProtocol
 @testable import GameCapture
 
 final class AgentInputTests: XCTestCase {
@@ -95,19 +96,58 @@ final class AgentInputTests: XCTestCase {
 
     func testOverlappingHoldsChainWithoutNeutralEdge() {
         let (pipeline, _, session) = pipeline(active: false)
-        // Chained movement: each hold arrives before the previous one expires.
-        pipeline.setAgent(ControllerInput(lx: 1), holdMs: 60)
-        for _ in 0..<4 {
-            usleep(30_000)
-            pipeline.setAgent(ControllerInput(lx: 1), holdMs: 60)
+        // Chained movement: every hold is replaced long before it could expire.
+        for _ in 0..<5 {
+            pipeline.setAgent(ControllerInput(lx: 1), holdMs: 60_000)
+            usleep(5_000)
         }
         pipeline.setAgent(ControllerInput(buttons: ["B"], lx: 1), holdMs: 60_000)
-        usleep(100_000)
+        usleep(20_000)
         XCTAssertEqual(session.drain(), [ControllerInput(lx: 1), ControllerInput(buttons: ["B"], lx: 1)])
         XCTAssertNotNil(pipeline.agentHoldUntil)
         pipeline.clearAgent()
         XCTAssertEqual(session.drain(), [.neutral])
+        XCTAssertNil(pipeline.agentHoldUntil)
         pipeline.setSession(nil)
+    }
+
+    func testHeartbeatRepeatsHoldUntilExpiryThenOnlyNeutral() {
+        let pipeline = ControllerInputPipeline() // real 20 ms heartbeat
+        pipeline.select(nil, remote: false)
+        let session = RecordingControllerSession(); pipeline.setSession(session)
+        usleep(30_000); _ = session.drain()
+        let result = pipeline.setAgent(ControllerInput(buttons: ["DPAD_DOWN"]), holdMs: 200)
+        let deadline = Date().addingTimeInterval(2)
+        while pipeline.agentHoldUntil != nil && Date() < deadline { usleep(2000) }
+        usleep(100_000)
+        let sent = session.timeline()
+        let held = sent.filter { $0.0 == ControllerInput(buttons: ["DPAD_DOWN"]) }
+        XCTAssertGreaterThanOrEqual(held.count, 3) // the edge plus heartbeats during the hold
+        XCTAssertTrue(held.allSatisfy { $0.1 < result.until + 0.002 })
+        let firstNeutral = sent.firstIndex { $0.0 == .neutral && $0.1 >= result.until - 0.002 }
+        XCTAssertNotNil(firstNeutral)
+        if let firstNeutral { XCTAssertTrue(sent[firstNeutral...].allSatisfy { $0.0 == .neutral }) }
+        pipeline.setSession(nil)
+    }
+
+    @MainActor func testLinkLossDropsHoldAndReconnectDoesNotRestoreIt() {
+        let store = PiDeviceStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), credentialSave: { _, _ in true })
+        let model = ControllerModel(startDiscovery: false, controllerProvider: { [] }, store: store)
+        let session = RecordingControllerSession()
+        model.inputPipeline.setSession(session)
+        model.setLinkConnected(true, backend: "usb")
+        usleep(5_000); _ = session.drain()
+        guard case .success = model.agentInput(AgentInputArgs(buttons: ["DPAD_DOWN"], holdMs: 60_000)) else { return XCTFail("input refused") }
+        XCTAssertNotNil(model.inputPipeline.agentHoldUntil)
+        model.setLinkConnected(false, backend: nil) // e.g. "reconnecting" on the same session
+        XCTAssertNil(model.inputPipeline.agentHoldUntil)
+        XCTAssertEqual(session.timeline().last?.0, .neutral)
+        model.setLinkConnected(true, backend: "usb")
+        usleep(100_000) // several heartbeats
+        let afterRelease = session.timeline().drop { $0.0 != .neutral }
+        XCTAssertFalse(afterRelease.contains { $0.0.buttons.contains("DPAD_DOWN") })
+        XCTAssertNil(model.inputPipeline.agentHoldUntil)
+        model.inputPipeline.setSession(nil)
     }
 
     func testNoSessionReportsNilForwardedAt() {

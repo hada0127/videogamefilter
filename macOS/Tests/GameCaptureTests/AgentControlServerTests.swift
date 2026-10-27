@@ -13,11 +13,19 @@ final class FakeAgentHost: @unchecked Sendable {
     var frame: CVPixelBuffer?
     var gate: DispatchSemaphore?
     let entered = DispatchSemaphore(value: 0)
+    var statusGate: DispatchSemaphore?
+    let statusEntered = DispatchSemaphore(value: 0)
+    var statusCalls = 0
+    var hostCalls: Int { lock.lock(); defer { lock.unlock() }; return statusCalls + inputs.count + releases }
     let queue = DispatchQueue(label: "test.agent.host")
 
     var host: AgentControlHost {
         AgentControlHost(
-            status: { ["controller": ["connected": true, "transport": "udp-v2"], "agent": ["holdUntil": NSNull()]] },
+            status: { [self] in
+                lock.lock(); statusCalls += 1; let gate = statusGate; lock.unlock()
+                if let gate { statusEntered.signal(); gate.wait() }
+                return ["controller": ["connected": true, "transport": "udp-v2"], "agent": ["holdUntil": NSNull()]]
+            },
             input: { [self] args in
                 lock.lock(); defer { lock.unlock() }
                 guard connected else { return .failure(AgentError(.notConnected, "not connected")) }
@@ -61,22 +69,94 @@ final class AgentControlServerTests: XCTestCase {
         return buffer
     }
 
-    /// Sends raw bytes and returns the first response line.
-    private func raw(_ bytes: Data) throws -> [String: Any] {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0); defer { close(fd) }
+    private func connected() -> Int32 {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
         withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: Array(socketPath.utf8) + [0]) }
         XCTAssertEqual(withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }, 0)
         var on: Int32 = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, 4)
         var timeout = timeval(tv_sec: 3, tv_usec: 0); setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        _ = bytes.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
+        return fd
+    }
+
+    private func readLines(_ fd: Int32, count wanted: Int) -> [[String: Any]] {
         var response = Data(), buffer = [UInt8](repeating: 0, count: 4096)
-        while !response.contains(10) {
+        while response.filter({ $0 == 10 }).count < wanted {
             let count = recv(fd, &buffer, buffer.count, 0)
             guard count > 0 else { break }
             response.append(contentsOf: buffer[..<count])
         }
-        return try XCTUnwrap(AgentJSON.object(response.prefix(while: { $0 != 10 })))
+        return response.split(separator: 10).compactMap { AgentJSON.object(Data($0)) }
+    }
+
+    /// Sends raw bytes and returns the first response line.
+    private func raw(_ bytes: Data) throws -> [String: Any] {
+        let fd = connected(); defer { close(fd) }
+        _ = bytes.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
+        return try XCTUnwrap(readLines(fd, count: 1).first)
+    }
+
+    private func statusLine(_ id: String) -> Data { Data(#"{"v":1,"id":"\#(id)","cmd":"status"}"#.utf8) + Data([10]) }
+
+    private func wait(until predicate: () -> Bool, seconds: Double = 3) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !predicate() { if Date() > deadline { return false }; usleep(2000) }
+        return true
+    }
+
+    func testOneRequestInFlightPerConnectionAndGlobalHostCap() throws {
+        let fake = FakeAgentHost()
+        let gate = DispatchSemaphore(value: 0)
+        fake.statusGate = gate
+        let server = try server(fake); defer { server.stop() }
+
+        // Three pipelined requests on one connection: only the first reaches the (blocked) host.
+        let pipelined = connected(); defer { close(pipelined) }
+        let burst = statusLine("a") + statusLine("b") + statusLine("c")
+        _ = burst.withUnsafeBytes { send(pipelined, $0.baseAddress, $0.count, 0) }
+        XCTAssertEqual(fake.statusEntered.wait(timeout: .now() + 3), .success)
+        usleep(50_000)
+        XCTAssertEqual(server.pendingHostTaskCount, 1)
+        XCTAssertEqual(fake.hostCalls, 1)
+
+        // Clients that send and hang up keep their slot until the work has run, so the cap holds.
+        for index in 0..<(AgentControlServer.maxPendingHostTasks + 4) {
+            let fd = connected()
+            let line = statusLine("gone-\(index)")
+            _ = line.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
+            usleep(10_000)
+            close(fd)
+        }
+        XCTAssertTrue(wait { server.pendingHostTaskCount == AgentControlServer.maxPendingHostTasks })
+        usleep(50_000)
+        XCTAssertEqual(server.pendingHostTaskCount, AgentControlServer.maxPendingHostTasks)
+        XCTAssertEqual(errorCode(try request("status")), "busy")
+        XCTAssertEqual(errorCode(try request("input", ["buttons": ["A"]])), "busy")
+        XCTAssertTrue(fake.inputs.isEmpty)
+
+        // Unblock: the live connection gets all three answers in order; abandoned work never ran.
+        fake.lock.lock(); fake.statusGate = nil; fake.lock.unlock()
+        gate.signal()
+        let answers = readLines(pipelined, count: 3)
+        XCTAssertEqual(answers.compactMap { $0["id"] as? String }, ["a", "b", "c"])
+        XCTAssertTrue(answers.allSatisfy { $0["ok"] as? Bool == true })
+        XCTAssertTrue(wait { server.pendingHostTaskCount == 0 })
+        XCTAssertEqual(fake.hostCalls, 3)
+        XCTAssertEqual((try request("status"))["ok"] as? Bool, true)
+    }
+
+    func testPipelinedFloodBeyondLineLimitIsCut() throws {
+        let fake = FakeAgentHost()
+        let gate = DispatchSemaphore(value: 0); fake.statusGate = gate
+        let server = try server(fake); defer { server.stop(); gate.signal() }
+        let fd = connected(); defer { close(fd) }
+        var flood = Data()
+        while flood.count <= AgentProtocol.maxLineBytes + 1024 { flood.append(statusLine("x")) }
+        _ = flood.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
+        let lines = readLines(fd, count: 1)
+        XCTAssertEqual(lines.first.flatMap { errorCode($0) }, "bad_request")
+        XCTAssertEqual(fake.hostCalls, 1)
+        fake.lock.lock(); fake.statusGate = nil; fake.lock.unlock()
     }
 
     private func errorCode(_ response: [String: Any]) -> String? {
@@ -140,6 +220,25 @@ final class AgentControlServerTests: XCTestCase {
         XCTAssertTrue(fake.inputs.isEmpty)
         let echoed = try raw(Data(#"{"v":1,"id":"abc","cmd":"nope"}"#.utf8) + Data([10]))
         XCTAssertEqual(echoed["id"] as? String, "abc")
+    }
+
+    func testSnapshotFilesAreUniquePerRequestAndPruned() throws {
+        let fake = FakeAgentHost(); fake.frame = Self.bgra(width: 1920, height: 1080)
+        let server = try server(fake); defer { server.stop() }
+        let small = try XCTUnwrap((try request("snapshot", ["maxWidth": 640]))["result"] as? [String: Any])
+        let large = try XCTUnwrap((try request("snapshot", ["maxWidth": 1280]))["result"] as? [String: Any])
+        XCTAssertEqual(small["seq"] as? Int, large["seq"] as? Int)
+        let smallPath = try XCTUnwrap(small["path"] as? String), largePath = try XCTUnwrap(large["path"] as? String)
+        XCTAssertNotEqual(smallPath, largePath)
+        XCTAssertEqual(NSImage(contentsOfFile: smallPath)?.representations.first?.pixelsWide, 640)
+        XCTAssertEqual(NSImage(contentsOfFile: largePath)?.representations.first?.pixelsWide, 1280)
+        var paths = [smallPath, largePath]
+        for _ in 0..<(AgentControlServer.keptSnapshots + 3) {
+            paths.append(try XCTUnwrap(((try request("snapshot", ["maxWidth": 320]))["result"] as? [String: Any])?["path"] as? String))
+        }
+        let kept = try FileManager.default.contentsOfDirectory(atPath: snapshots.path).filter { $0.hasPrefix("snap-") && $0.hasSuffix(".png") }
+        XCTAssertEqual(kept.count, AgentControlServer.keptSnapshots)
+        XCTAssertEqual(Set(kept), Set(paths.suffix(AgentControlServer.keptSnapshots).map { URL(fileURLWithPath: $0).lastPathComponent }))
     }
 
     func testConcurrentSnapshotIsBusy() throws {

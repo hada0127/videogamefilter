@@ -35,14 +35,13 @@ struct Commands {
         var outcome = call("snapshot", maxWidth.map { ["maxWidth": $0] } ?? [:])
         guard outcome.ok, let out, var result = outcome.result, let path = result["path"] as? String else { return outcome }
         do {
-            let destination = URL(fileURLWithPath: out)
-            if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
-            try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: destination)
-            result["out"] = destination.path
+            result["out"] = try AgentFiles.copyReplacing(URL(fileURLWithPath: path), to: URL(fileURLWithPath: out)).path
             outcome.json["result"] = result
             return outcome
+        } catch AgentFiles.CopyError.destinationIsDirectory {
+            return .usage("--out must be a file path, not a directory")
         } catch {
-            return .local("internal", "cannot copy snapshot: \(error.localizedDescription)", exit: 1)
+            return .local("internal", "cannot copy snapshot: \(error)", exit: 1)
         }
     }
 

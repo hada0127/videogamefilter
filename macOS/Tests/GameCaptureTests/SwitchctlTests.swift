@@ -92,7 +92,7 @@ final class SwitchctlTests: XCTestCase {
             #"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"no_such_tool"}}"#,
             #"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#,
             #"{"jsonrpc":"2.0","id":8,"method":"ping"}"#,
-            #"{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+            #"{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"old","version":"1"}}}"#,
             "not json"
         ].joined(separator: "\n") + "\n"
         let result = try run(["mcp"], stdin: script)
@@ -121,11 +121,120 @@ final class SwitchctlTests: XCTestCase {
         XCTAssertEqual((byID[6]?["error"] as? [String: Any])?["code"] as? Int, -32602)
         XCTAssertEqual((byID[7]?["error"] as? [String: Any])?["code"] as? Int, -32601)
         XCTAssertNotNil(byID[8]?["result"] as? [String: Any])
+        // Only the fully implemented version is offered; 2025-03-26 (batch receive) is not.
         XCTAssertEqual((byID[9]?["result"] as? [String: Any])?["protocolVersion"] as? String, "2025-06-18")
         XCTAssertTrue(result.lines.contains { ($0["error"] as? [String: Any])?["code"] as? Int == -32700 })
 
         fake.lock.lock(); fake.connected = false; fake.lock.unlock()
-        let refused = try run(["mcp"], stdin: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"switch_press","arguments":{"buttons":["B"],"wait":false}}}"# + "\n")
+        let refused = try run(["mcp"], stdin: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"switch_press","arguments":{"buttons":["B"]}}}"# + "\n")
         XCTAssertEqual((refused.lines.first?["result"] as? [String: Any])?["isError"] as? Bool, true)
+    }
+
+    func testMCPDefaultsToNoWait() throws {
+        let fake = FakeAgentHost()
+        let server = try start(fake); defer { server.stop() }
+        let result = try run(["mcp"], stdin: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"switch_input","arguments":{"lx":1,"holdMs":60000}}}"# + "\n")
+        XCTAssertEqual((result.lines.first?["result"] as? [String: Any])?["isError"] as? Bool, false)
+        XCTAssertLessThan(result.seconds, 10)
+        let tools = MCPToolsProbe.descriptions(try run(["mcp"], stdin: #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"# + "\n").lines)
+        XCTAssertTrue(tools["switch_press"]?.contains("Returns immediately unless wait is true") == true)
+        XCTAssertTrue(tools["switch_input"]?.contains("Returns immediately unless wait is true") == true)
+    }
+
+    func testMCPEnvelopeValidationNeverReachesHost() throws {
+        let fake = FakeAgentHost(); fake.frame = AgentControlServerTests.bgra(width: 64, height: 36)
+        let server = try start(fake); defer { server.stop() }
+        let press = #""method":"tools/call","params":{"name":"switch_press","arguments":{"buttons":["A"]}}"#
+        let cases: [(line: String, code: Int?, id: Any?)] = [
+            ("{oops", -32700, nil),
+            (#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#, -32600, nil),
+            (#"42"#, -32600, nil),
+            (#"{}"#, -32600, nil),
+            (#"{"jsonrpc":"2.0","id":true,"# + press + "}", -32600, nil),
+            (#"{"jsonrpc":"2.0","id":[1],"# + press + "}", -32600, nil),
+            (#"{"jsonrpc":"2.0","id":null,"# + press + "}", -32600, nil),
+            (#"{"jsonrpc":"2.0","id":1.5,"# + press + "}", -32600, nil),
+            (#"{"jsonrpc":"1.0","id":"s","# + press + "}", -32600, "s"),
+            (#"{"jsonrpc":"2.0","id":"t","method":7}"#, -32600, "t"),
+            (#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":1}"#, -32602, 3),
+            (#"{"jsonrpc":"2.0","id":4,"method":"ping","params":[]}"#, -32602, 4),
+            (#"{"jsonrpc":"2.0","id":5,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#, -32602, 5),
+            (#"{"jsonrpc":"2.0","id":6,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x"}}}"#, -32602, 6),
+            (#"{"jsonrpc":"2.0","method":"notifications/initialized","params":1}"#, -32600, nil),
+            (#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, nil, nil),
+            (#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#, nil, nil),
+            (#"{"jsonrpc":"2.0","id":"ok","method":"ping"}"#, 0, "ok"),
+        ]
+        let result = try run(["mcp"], stdin: cases.map(\.line).joined(separator: "\n") + "\n")
+        XCTAssertEqual(result.code, 0)
+        let expected = cases.filter { $0.code != nil }
+        XCTAssertEqual(result.lines.count, expected.count)
+        for (line, want) in zip(result.lines, expected) {
+            if want.code == 0 { XCTAssertNotNil(line["result"], want.line); XCTAssertEqual(line["id"] as? String, "ok"); continue }
+            XCTAssertEqual((line["error"] as? [String: Any])?["code"] as? Int, want.code, want.line)
+            switch want.id {
+            case nil: XCTAssertTrue(line["id"] is NSNull, want.line)
+            case let id as String: XCTAssertEqual(line["id"] as? String, id, want.line)
+            case let id as Int: XCTAssertEqual(line["id"] as? Int, id, want.line)
+            default: XCTFail(want.line)
+            }
+        }
+        XCTAssertEqual(fake.hostCalls, 0)
+        XCTAssertTrue(fake.inputs.isEmpty)
+    }
+
+    func testSnapshotOutNeverDeletesAndRejectsDirectories() throws {
+        let fake = FakeAgentHost(); fake.frame = AgentControlServerTests.bgra(width: 640, height: 360)
+        let server = try start(fake); defer { server.stop() }
+        let folder = root.appendingPathComponent("keep")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("precious".utf8).write(to: folder.appendingPathComponent("inside.txt"))
+        let refused = try run(["snapshot", "--out", folder.path])
+        XCTAssertEqual(refused.code, 2)
+        XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("inside.txt")), "precious")
+
+        let target = root.appendingPathComponent("shot.png")
+        try Data("old".utf8).write(to: target)
+        let replaced = try run(["snapshot", "--max-width", "320", "--out", target.path])
+        XCTAssertEqual(replaced.code, 0)
+        XCTAssertEqual(NSImage(contentsOf: target)?.representations.first?.pixelsWide, 320)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).allSatisfy { !$0.hasSuffix(".tmp") })
+    }
+
+    func testCopyReplacingKeepsExistingFileOnFailureAndHandlesSamePath() throws {
+        let source = root.appendingPathComponent("source.png")
+        try Data("new".utf8).write(to: source)
+        // Same file (also via a different spelling of the path): no-op, content kept.
+        XCTAssertNoThrow(try AgentFiles.copyReplacing(source, to: URL(fileURLWithPath: root.path + "/./source.png")))
+        XCTAssertEqual(try String(contentsOf: source), "new")
+
+        // Unwritable destination folder: the copy fails and the existing file is untouched.
+        let locked = root.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        let existing = locked.appendingPathComponent("shot.png")
+        try Data("old".utf8).write(to: existing)
+        chmod(locked.path, 0o500)
+        defer { chmod(locked.path, 0o700) }
+        XCTAssertThrowsError(try AgentFiles.copyReplacing(source, to: existing))
+        XCTAssertEqual(try String(contentsOf: existing), "old")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: locked.path), ["shot.png"])
+
+        // Missing source: existing destination kept.
+        chmod(locked.path, 0o700)
+        XCTAssertThrowsError(try AgentFiles.copyReplacing(root.appendingPathComponent("missing.png"), to: existing))
+        XCTAssertEqual(try String(contentsOf: existing), "old")
+        XCTAssertThrowsError(try AgentFiles.copyReplacing(source, to: locked)) {
+            XCTAssertEqual($0 as? AgentFiles.CopyError, .destinationIsDirectory)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: locked.path), ["shot.png"])
+    }
+}
+
+enum MCPToolsProbe {
+    static func descriptions(_ lines: [[String: Any]]) -> [String: String] {
+        let tools = (lines.first?["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? []
+        return Dictionary(uniqueKeysWithValues: tools.compactMap { tool in
+            (tool["name"] as? String).map { ($0, tool["description"] as? String ?? "") }
+        })
     }
 }
