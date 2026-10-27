@@ -2,6 +2,7 @@ import AppKit
 import GameController
 import SwiftUI
 import OSLog
+import AgentControlProtocol
 
 @MainActor final class ControllerModel: ObservableObject {
     @Published private(set) var controllers: [GCController] = []
@@ -29,6 +30,8 @@ import OSLog
     @Published private(set) var detail = ""
     @Published private(set) var running = false
     @Published private(set) var connected = false
+    /// Raw backend reported with the last "connected" state ("usb" or a Bluetooth name).
+    private(set) var backend: String?
     let liveInput = ControllerLiveInput()
     private var activity: NSObjectProtocol?
     private var bridge: ControllerSession?
@@ -139,6 +142,7 @@ import OSLog
                     if let message { self.logger.error("Pi connection detail: \(message, privacy: .public)") }
                 }
                 self.connected = state == "connected"
+                self.backend = self.connected ? message : nil
                 if self.connected { self.pairingRequested = false }
                 if state == "error" {
                     self.disconnect(manual: false); self.status = "다시 연결 대기 중"; self.detail = message ?? ""
@@ -162,12 +166,45 @@ import OSLog
         retry?.cancel(); retry = nil
         generation = UUID(); inputPipeline.setSession(nil); bridge?.stop(); bridge = nil; activeEndpoint = nil
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
-        running = false; connected = false; liveInput.value = .neutral; status = "연결 안 됨"
+        running = false; connected = false; backend = nil; liveInput.value = .neutral; status = "연결 안 됨"
     }
     func press(_ buttons: [String]) {
         guard connected else { return }
         inputPipeline.press(buttons)
     }
+    // MARK: agent control (local socket; see AgentControlServer)
+
+    /// Controller, metrics and agent sections of the agent `status` result. No hosts, keys or tokens.
+    func agentStatus() -> [String: Any] {
+        let source = selected == Self.moonlightID ? "moonlight" : (selected.isEmpty ? "none" : "gamepad")
+        let transport = running ? bridge?.transportMetrics() : nil
+        let metrics = inputPipeline.metrics
+        var rtt: Any = NSNull()
+        if let window = transport?.rtt {
+            rtt = ["samples": window.samples, "p50Ms": window.p50Ms, "p99Ms": window.p99Ms, "maxMs": window.maxMs, "windowEndUptime": window.windowEndUptime]
+        }
+        return [
+            "controller": ["source": source, "piRunning": running, "connected": connected,
+                           "backend": connected ? (backend == "usb" ? "usb" : "bluetooth") : NSNull(),
+                           "transport": transport?.kind ?? NSNull()] as [String: Any],
+            "metrics": ["forwardedChanges": metrics.forwardedChanges, "maxForwardDelayMs": metrics.maxForwardDelayMS, "rtt": rtt] as [String: Any],
+            "agent": ["holdUntil": inputPipeline.agentHoldUntil ?? NSNull()] as [String: Any]
+        ]
+    }
+
+    /// Agent input works while the app is in the background, but only with a live Switch link.
+    func agentInput(_ args: AgentInputArgs) -> Result<[String: Any], AgentError> {
+        guard connected else { return .failure(AgentError(.notConnected, "the Switch controller link is not connected")) }
+        let value = ControllerInput(buttons: args.buttons, lx: Float(args.lx), ly: Float(args.ly), rx: Float(args.rx), ry: Float(args.ry))
+        let result = inputPipeline.setAgent(value, holdMs: args.holdMs)
+        return .success(["forwardedAt": result.forwardedAt ?? NSNull(), "until": result.until])
+    }
+
+    func agentRelease() -> [String: Any] {
+        inputPipeline.clearAgent()
+        return ["released": true]
+    }
+
     func prepareSD() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.allowsMultipleSelection = false; panel.directoryURL = URL(fileURLWithPath: "/Volumes")

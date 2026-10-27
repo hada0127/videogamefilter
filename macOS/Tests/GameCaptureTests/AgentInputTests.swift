@@ -93,6 +93,23 @@ final class AgentInputTests: XCTestCase {
         pipeline.setSession(nil)
     }
 
+    func testOverlappingHoldsChainWithoutNeutralEdge() {
+        let (pipeline, _, session) = pipeline(active: false)
+        // Chained movement: each hold arrives before the previous one expires.
+        pipeline.setAgent(ControllerInput(lx: 1), holdMs: 60)
+        for _ in 0..<4 {
+            usleep(30_000)
+            pipeline.setAgent(ControllerInput(lx: 1), holdMs: 60)
+        }
+        pipeline.setAgent(ControllerInput(buttons: ["B"], lx: 1), holdMs: 60_000)
+        usleep(100_000)
+        XCTAssertEqual(session.drain(), [ControllerInput(lx: 1), ControllerInput(buttons: ["B"], lx: 1)])
+        XCTAssertNotNil(pipeline.agentHoldUntil)
+        pipeline.clearAgent()
+        XCTAssertEqual(session.drain(), [.neutral])
+        pipeline.setSession(nil)
+    }
+
     func testNoSessionReportsNilForwardedAt() {
         let pipeline = ControllerInputPipeline(heartbeat: false)
         XCTAssertNil(pipeline.setAgent(ControllerInput(buttons: ["B"]), holdMs: 10).forwardedAt)
