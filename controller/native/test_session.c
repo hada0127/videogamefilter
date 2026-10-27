@@ -10,6 +10,7 @@
 #include <string.h>
 #include <errno.h>
 #include <poll.h>
+#include "protocol.h"
 
 static int test_tcp=-1,test_hid=-1;
 static char test_lock[]="/tmp/vgf-session-XXXXXX";
@@ -23,8 +24,10 @@ static int socket_usb_open(void){return test_hid;}
 static int socket_usb_configured(void){return 1;}
 static int rfkill_blocked=-1;
 static int recorded_rfkill(int block){rfkill_blocked=block;return 1;}
-static unsigned yields; /* Pure-timeout polls: the flood throttle. */
-static int counting_poll(struct pollfd *f,nfds_t n,int t){if(!n&&t>=1)yields++;return poll(f,n,t);}
+/* Order of the first HID write of `watched` and the first ack datagram. */
+static uint8_t watched[8];static unsigned order,hid_at,ack_at;
+static ssize_t ordered_write(int fd,const void *b,size_t n){ssize_t r=write(fd,b,n);if(fd==test_hid&&r==8&&!memcmp(b,watched,8)&&!hid_at)hid_at=++order;return r;}
+static ssize_t ordered_sendto(int fd,const void *b,size_t n,int f,const struct sockaddr *a,socklen_t l){ssize_t r=sendto(fd,b,n,f,a,l);if(r==VGF_ACK_SIZE&&!ack_at)ack_at=++order;return r;}
 static int plain_write(SSL *ssl,const void *data,int n){(void)ssl;return (int)send(test_tcp,data,(size_t)n,MSG_NOSIGNAL);}
 static int plain_read(SSL *ssl,void *data,int n){(void)ssl;return (int)recv(test_tcp,data,(size_t)n,0);}
 static int plain_pending(const SSL *ssl){(void)ssl;return 0;}
@@ -35,7 +38,8 @@ static int plain_error(const SSL *ssl,int n){(void)ssl;return n<0&&(errno==EAGAI
 #define vgf_usb_open socket_usb_open
 #define vgf_usb_configured socket_usb_configured
 #define vgf_bt_rfkill recorded_rfkill
-#define poll counting_poll
+#define write ordered_write
+#define sendto ordered_sendto
 #define SSL_write plain_write
 #define SSL_read plain_read
 #define SSL_pending plain_pending
@@ -46,7 +50,8 @@ static int plain_error(const SSL *ssl,int n){(void)ssl;return n<0&&(errno==EAGAI
 #undef vgf_usb_open
 #undef vgf_usb_configured
 #undef vgf_bt_rfkill
-#undef poll
+#undef write
+#undef sendto
 #undef SSL_write
 #undef SSL_read
 #undef SSL_pending
@@ -102,6 +107,8 @@ static void usb_session_survives_stall(void){
     const uint32_t buttons[]={1u<<A,(1u<<A)|(1u<<B),1u<<B,0};
     for(unsigned i=0;i<4;i++)send_input(udp,&peer,key,i+1,buttons[i]);
     usleep(10000);
+    /* Queued edges are still waiting for the host: no ack yet. */
+    struct pollfd u={udp,POLLIN,0};assert(poll(&u,1,0)==0);
     uint8_t report[8];for(unsigned i=0;i<filled;i++){assert(read(hid[1],report,8)==8);assert(report[0]==0xaa);}
     unsigned edge=0;double deadline=now_s()+1;
     while(edge<4&&now_s()<deadline){
@@ -112,34 +119,29 @@ static void usb_session_survives_stall(void){
         assert(!memcmp(report,bytes,8));edge++;
     }
     assert(edge==4);
-    /* At most one ack per loop, for the newest sequence; every ack is authenticated and the last is 4. */
-    for(uint64_t last=0;last<4;){
-        struct pollfd p={udp,POLLIN,0};assert(poll(&p,1,1000)==1);uint8_t ack[64],expected[VGF_ACK_SIZE];uint64_t seq=0;
-        assert(recv(udp,ack,sizeof(ack),0)==VGF_ACK_SIZE);for(int i=0;i<8;i++)seq=(seq<<8)|ack[i];
-        assert(seq>last&&seq<=4);vgf_ack(key,seq,expected);assert(!memcmp(ack,expected,VGF_ACK_SIZE));last=seq;
-    }
+    /* After all four edges reach HID, exactly one authenticated ack names the newest sequence. */
+    assert(poll(&u,1,1000)==1);uint8_t ack[64],expected[VGF_ACK_SIZE];
+    assert(recv(udp,ack,sizeof(ack),0)==VGF_ACK_SIZE);vgf_ack(key,4,expected);assert(!memcmp(ack,expected,VGF_ACK_SIZE));
+    assert(poll(&u,1,100)==0);
     close(tcp[1]);wait_child(child);close(udp);close(hid[1]);
 }
-static void udp_flood_yields_cpu(void){
+static void usb_report_precedes_ack(void){
     int hid[2],tcp[2];socket_hid(hid);assert(socketpair(AF_UNIX,SOCK_STREAM,0,tcp)==0);
+    vgf_input x={.buttons=1u<<X};vgf_usb_report(&x,watched);
     pid_t child=fork();assert(child>=0);
     if(!child){
-        alarm(5);close(hid[1]);close(tcp[1]);test_tcp=tcp[0];test_hid=hid[0];yields=0;
-        session(NULL,tcp[0],0);close(tcp[0]);assert(yields>=1);_exit(0);
+        alarm(5);close(hid[1]);close(tcp[1]);test_tcp=tcp[0];test_hid=hid[0];
+        session(NULL,tcp[0],0);close(tcp[0]);assert(hid_at&&ack_at&&hid_at<ack_at);_exit(0);
     }
     close(hid[0]);close(tcp[0]);unsigned char key[32];struct sockaddr_in peer;read_transport(tcp[1],key,&peer);
-    int udp=socket(AF_INET,SOCK_DGRAM,0);assert(udp>=0);
-    /* Queue more than one 64-datagram drain while the session is stopped: forged ones, then three valid. */
-    assert(kill(child,SIGSTOP)==0);
-    uint8_t forged[VGF_PACKET_SIZE]={0};memcpy(forged+8,"VGF2",4);
-    for(int i=0;i<100;i++){forged[7]=(uint8_t)(i+1);assert(sendto(udp,forged,sizeof(forged),0,(struct sockaddr*)&peer,sizeof(peer))==sizeof(forged));}
-    for(unsigned i=1;i<=3;i++)send_input(udp,&peer,key,i,1u<<A);
-    assert(kill(child,SIGCONT)==0);
-    /* The second drain accepts all three valid datagrams; only the newest is acknowledged. */
-    struct pollfd p={udp,POLLIN,0};assert(poll(&p,1,1000)==1);uint8_t ack[64],expected[VGF_ACK_SIZE];
-    assert(recv(udp,ack,sizeof(ack),0)==VGF_ACK_SIZE);vgf_ack(key,3,expected);assert(!memcmp(ack,expected,VGF_ACK_SIZE));
-    assert(poll(&p,1,100)==0);
-    close(tcp[1]);wait_child(child);close(udp);close(hid[1]);
+    int udp=socket(AF_INET,SOCK_DGRAM,0);assert(udp>=0);send_input(udp,&peer,key,1,1u<<X);
+    int acked=0;double deadline=now_s()+1;uint8_t buf[64];
+    while(!acked&&now_s()<deadline){
+        struct pollfd p[2]={{hid[1],POLLIN,0},{udp,POLLIN,0}};if(poll(p,2,100)<=0)continue;
+        if(p[0].revents&POLLIN)assert(read(hid[1],buf,8)==8);
+        if(p[1].revents&POLLIN){assert(recv(udp,buf,sizeof(buf),0)==VGF_ACK_SIZE);acked=1;}
+    }
+    assert(acked);close(tcp[1]);wait_child(child);close(udp);close(hid[1]);
 }
 static void usb_cleanup_releases_after_resume(void){
     int hid[2],ready[2];socket_hid(hid);unsigned filled=fill_hid(hid[0]);assert(pipe(ready)==0);
@@ -164,6 +166,6 @@ static void usb_cleanup_is_bounded(void){
 }
 int main(void){
     signal(SIGPIPE,SIG_IGN);alarm(10);int lock=mkstemp(test_lock);assert(lock>=0);close(lock);
-    usb_session_survives_stall();udp_flood_yields_cpu();usb_cleanup_releases_after_resume();usb_cleanup_is_bounded();
-    assert(unlink(test_lock)==0);puts("PASS USB session survives 100ms backpressure, ordered queued edges after resume, authenticated newest-only acks, UDP flood yields 1 ms, Bluetooth radio blocked, neutral cleanup retry, bounded stalled cleanup");return 0;
+    usb_session_survives_stall();usb_report_precedes_ack();usb_cleanup_releases_after_resume();usb_cleanup_is_bounded();
+    assert(unlink(test_lock)==0);puts("PASS USB session survives 100ms backpressure, ordered queued edges after resume, single newest ack after HID delivery, HID report precedes ack, Bluetooth radio blocked, neutral cleanup retry, bounded stalled cleanup");return 0;
 }

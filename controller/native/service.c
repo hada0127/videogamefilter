@@ -134,7 +134,7 @@ static void session(SSL *ssl,int tcp,int pair){
     double started=now_s(),next_report=started,next_status=started,last_input=started,out_started=0,next_usb_check=0;
     char output[512]={0};size_t output_len=0,output_at=0;int output_want_read=0;
     uint8_t pending_report[50];double report_started=0;int have_report=0;vgf_input current={0};
-    uint64_t ack_sequence=0;struct sockaddr_in ack_to;int udp_saturated=0;
+    uint64_t ack_sequence=0;struct sockaddr_in ack_to;
     while(!stopping){
         double now=now_s();
         struct pollfd fds[5]={{tcp,POLLIN,0},{udp,POLLIN,0},{bt.ctrl,POLLIN,0},{bt.itr,POLLIN,0},{-1,0,0}};
@@ -145,22 +145,19 @@ static void session(SSL *ssl,int tcp,int pair){
         if(!connected){if(listening){fds[2].fd=bt.listen_ctrl;fds[3].fd=bt.listen_itr;}else{fds[2].events|=POLLOUT;fds[3].events|=POLLOUT;}}
 
         int wait_ms=(int)ceil((next_report-now)*1000);if(wait_ms<0)wait_ms=0;if(wait_ms>8||!connected||(use_usb&&have_report))wait_ms=8;
-        /* Under SCHED_FIFO a datagram flood keeps poll ready; a full drain yields 1 ms first. */
-        if(udp_saturated){udp_saturated=0;poll(NULL,0,1);}
         int pr=poll(fds,4,wait_ms);if(pr<0&&errno!=EINTR)break;now=now_s();
         if(fds[0].revents&(POLLERR|POLLHUP|POLLNVAL))break;
         if((fds[0].revents&POLLIN)||SSL_pending(ssl)){
             char junk[1024];int n=SSL_read(ssl,junk,sizeof(junk));if(n<=0){int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;}
         }
         if(fds[1].revents&POLLIN){
-            int i=0;for(;i<64;i++){uint8_t data[57];struct sockaddr_in from;socklen_t fromlen=sizeof(from);ssize_t n=recvfrom(udp,data,sizeof(data),0,(struct sockaddr*)&from,&fromlen);if(n<0){if(errno==EAGAIN||errno==EWOULDBLOCK)break;goto done;}
+            for(int i=0;i<64;i++){uint8_t data[57];struct sockaddr_in from;socklen_t fromlen=sizeof(from);ssize_t n=recvfrom(udp,data,sizeof(data),0,(struct sockaddr*)&from,&fromlen);if(n<0){if(errno==EAGAIN||errno==EWOULDBLOCK)break;goto done;}
                 vgf_input v;if(vgf_decode(data,(size_t)n,key,&sequence,&v)){invalid++;continue;}
                 double arrived=now_s();if(last_udp>0){double gap=arrived-last_udp;if(gap>max_udp_gap)max_udp_gap=gap;if(gap>.04)udp_gaps++;}last_udp=arrived;
                 vgf_enqueue(&queue,&v,arrived);last_input=arrived;accepted++;
                 if(fromlen==sizeof(from)&&from.sin_family==AF_INET){ack_sequence=sequence;ack_to=from;}
                 if(use_usb||(protocol.vibration&&protocol.player)){double due=fmax(now,last_sent+(use_usb?.001:.004));if(due<next_report)next_report=due;}
             }
-            udp_saturated=i==64;
         }
         if(!connected){
             int ready=listening?vgf_bt_accept(&bt):vgf_bt_ready(&bt);
@@ -196,9 +193,9 @@ static void session(SSL *ssl,int tcp,int pair){
             }
             if(now-last_input>10)break;
         }
-        /* One ack per iteration, for the newest accepted datagram, after the HID decision.
-           Earlier sequences in the batch go unacknowledged. Old apps never read acks. */
-        if(ack_sequence){uint8_t ack[VGF_ACK_SIZE];vgf_ack(key,ack_sequence,ack);(void)sendto(udp,ack,sizeof(ack),MSG_DONTWAIT,(struct sockaddr*)&ack_to,sizeof(ack_to));ack_sequence=0;}
+        /* One ack per iteration, for the newest accepted datagram, once every queued input has
+           been written to HID. Earlier sequences in the batch go unacknowledged. Old apps never read acks. */
+        if(ack_sequence&&!queue.count&&!have_report){uint8_t ack[VGF_ACK_SIZE];vgf_ack(key,ack_sequence,ack);(void)sendto(udp,ack,sizeof(ack),MSG_DONTWAIT,(struct sockaddr*)&ack_to,sizeof(ack_to));ack_sequence=0;}
         if(now>=next_status&&!output_len){status_line(output,sizeof(output),connected?"connected":(listening?"connecting":"reconnecting"),use_usb);output_len=strlen(output);output_at=0;out_started=now;next_status=now+.5;}
         if(output_len){int n=SSL_write(ssl,output+output_at,(int)(output_len-output_at));if(n>0){output_at+=(size_t)n;output_want_read=0;if(output_at==output_len)output_at=output_len=0;}
             else {int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;output_want_read=e==SSL_ERROR_WANT_READ;}
