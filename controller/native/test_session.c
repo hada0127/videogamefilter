@@ -11,8 +11,9 @@
 #include <errno.h>
 #include <poll.h>
 #include "protocol.h"
+#include "serial.h"
 
-static int test_tcp=-1,test_hid=-1;
+static int test_tcp=-1,test_hid=-1,test_serial=-1;
 static char test_lock[]="/tmp/vgf-session-XXXXXX";
 static int isolated_open(const char *path,int flags,...){
     mode_t mode=0;
@@ -21,12 +22,13 @@ static int isolated_open(const char *path,int flags,...){
     return open(test_lock,flags,mode);
 }
 static int socket_usb_open(void){return test_hid;}
+static int socket_serial_open(const char *path){(void)path;return test_serial;}
 static int socket_usb_configured(void){return 1;}
 static int rfkill_blocked=-1;
 static int recorded_rfkill(int block){rfkill_blocked=block;return 1;}
 /* Order of the first HID write of `watched` and the first ack datagram. */
-static uint8_t watched[8];static unsigned order,hid_at,ack_at;
-static ssize_t ordered_write(int fd,const void *b,size_t n){ssize_t r=write(fd,b,n);if(fd==test_hid&&r==8&&!memcmp(b,watched,8)&&!hid_at)hid_at=++order;return r;}
+static uint8_t watched[8];static unsigned order,hid_at,ack_at,serial_at;
+static ssize_t ordered_write(int fd,const void *b,size_t n){ssize_t r=write(fd,b,n);if(fd==test_hid&&r==8&&!memcmp(b,watched,8)&&!hid_at)hid_at=++order;if(fd==test_serial&&r==VGF_SERIAL_ACK&&!serial_at)serial_at=++order;return r;}
 static ssize_t ordered_sendto(int fd,const void *b,size_t n,int f,const struct sockaddr *a,socklen_t l){ssize_t r=sendto(fd,b,n,f,a,l);if(r==VGF_ACK_SIZE&&!ack_at)ack_at=++order;return r;}
 static int plain_write(SSL *ssl,const void *data,int n){(void)ssl;return (int)send(test_tcp,data,(size_t)n,MSG_NOSIGNAL);}
 static int plain_read(SSL *ssl,void *data,int n){(void)ssl;return (int)recv(test_tcp,data,(size_t)n,0);}
@@ -36,6 +38,7 @@ static int plain_error(const SSL *ssl,int n){(void)ssl;return n<0&&(errno==EAGAI
 #define main daemon_main_for_test
 #define open isolated_open
 #define vgf_usb_open socket_usb_open
+#define vgf_serial_open socket_serial_open
 #define vgf_usb_configured socket_usb_configured
 #define vgf_bt_rfkill recorded_rfkill
 #define write ordered_write
@@ -48,6 +51,7 @@ static int plain_error(const SSL *ssl,int n){(void)ssl;return n<0&&(errno==EAGAI
 #undef main
 #undef open
 #undef vgf_usb_open
+#undef vgf_serial_open
 #undef vgf_usb_configured
 #undef vgf_bt_rfkill
 #undef write
@@ -143,6 +147,37 @@ static void usb_report_precedes_ack(void){
     }
     assert(acked);close(tcp[1]);wait_child(child);close(udp);close(hid[1]);
 }
+static void serial_session_precedes_ack_and_rejects_old_udp(void){
+    int hid[2],tcp[2],wire[2];socket_hid(hid);assert(socketpair(AF_UNIX,SOCK_STREAM,0,tcp)==0);
+    assert(socketpair(AF_UNIX,SOCK_STREAM,0,wire)==0);assert(set_nonblocking(wire[0])==0);
+    vgf_input a={.buttons=1u<<A};vgf_usb_report(&a,watched);
+    pid_t child=fork();assert(child>=0);
+    if(!child){
+        alarm(5);close(hid[1]);close(tcp[1]);close(wire[1]);test_tcp=tcp[0];test_hid=hid[0];test_serial=wire[0];
+        session(NULL,tcp[0],0);close(tcp[0]);assert(hid_at&&serial_at&&hid_at<serial_at);_exit(0);
+    }
+    close(hid[0]);close(tcp[0]);close(wire[0]);unsigned char key[32];struct sockaddr_in peer;read_transport(tcp[1],key,&peer);
+    uint8_t frame[VGF_SERIAL_INPUT];vgf_serial_frame(2,&a,frame);assert(write(wire[1],frame,sizeof(frame))==sizeof(frame));
+    uint8_t ack[VGF_SERIAL_ACK],expected[VGF_SERIAL_ACK];vgf_serial_ack(2,expected);
+    assert(read(wire[1],ack,sizeof(ack))==sizeof(ack));assert(!memcmp(ack,expected,sizeof(ack)));
+    int udp=socket(AF_INET,SOCK_DGRAM,0);assert(udp>=0);
+    send_input(udp,&peer,key,1,1u<<B);struct pollfd p={udp,POLLIN,0};assert(poll(&p,1,50)==0);
+    send_input(udp,&peer,key,4,1u<<B);
+    int got_ack=0;double deadline=now_s()+1;uint8_t udp_ack[VGF_ACK_SIZE],udp_expected[VGF_ACK_SIZE];
+    while(!got_ack&&now_s()<deadline){
+        struct pollfd ready[2]={{hid[1],POLLIN,0},{udp,POLLIN,0}};
+        if(poll(ready,2,100)<=0)continue;
+        if(ready[0].revents&POLLIN){uint8_t report[8];assert(read(hid[1],report,sizeof(report))==sizeof(report));}
+        if(ready[1].revents&POLLIN){assert(recv(udp,udp_ack,sizeof(udp_ack),0)==VGF_ACK_SIZE);got_ack=1;}
+    }
+    assert(got_ack);vgf_ack(key,4,udp_expected);
+    assert(!memcmp(udp_ack,udp_expected,sizeof(udp_ack)));
+    /* UDP 4 arrived first; late serial 3 gets a health ack but no replay. */
+    vgf_serial_frame(3,&a,frame);assert(write(wire[1],frame,sizeof(frame))==sizeof(frame));
+    vgf_serial_ack(3,expected);assert(read(wire[1],ack,sizeof(ack))==sizeof(ack));
+    assert(!memcmp(ack,expected,sizeof(ack)));
+    close(tcp[1]);wait_child(child);close(udp);close(wire[1]);close(hid[1]);
+}
 static void usb_cleanup_releases_after_resume(void){
     int hid[2],ready[2];socket_hid(hid);unsigned filled=fill_hid(hid[0]);assert(pipe(ready)==0);
     pid_t child=fork();assert(child>=0);
@@ -166,6 +201,6 @@ static void usb_cleanup_is_bounded(void){
 }
 int main(void){
     signal(SIGPIPE,SIG_IGN);alarm(10);int lock=mkstemp(test_lock);assert(lock>=0);close(lock);
-    usb_session_survives_stall();usb_report_precedes_ack();usb_cleanup_releases_after_resume();usb_cleanup_is_bounded();
-    assert(unlink(test_lock)==0);puts("PASS USB session survives 100ms backpressure, ordered queued edges after resume, single newest ack after HID delivery, HID report precedes ack, Bluetooth radio blocked, neutral cleanup retry, bounded stalled cleanup");return 0;
+    usb_session_survives_stall();usb_report_precedes_ack();serial_session_precedes_ack_and_rejects_old_udp();usb_cleanup_releases_after_resume();usb_cleanup_is_bounded();
+    assert(unlink(test_lock)==0);puts("PASS USB session survives 100ms backpressure, ordered queued edges after resume, single newest ack after HID delivery, HID report precedes ack, serial ack follows HID, old UDP rejected, newer UDP fallback accepted, Bluetooth radio blocked, neutral cleanup retry, bounded stalled cleanup");return 0;
 }

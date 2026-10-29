@@ -1,6 +1,6 @@
 # Raspberry Pi controller bridge
 
-switch-remote discovers a Raspberry Pi Zero W on the local network and automatically connects to a Pi prepared by this Mac. No Pi display, PIN entry, SSH login or IP address is needed during normal use. Game input uses authenticated UDP without retransmission; TLS manages enrollment and connection lifetime.
+switch-remote discovers a Raspberry Pi Zero W on the local network and automatically connects to a Pi prepared by this Mac. No Pi display, PIN entry, SSH login or IP address is needed during normal use. Game input prefers a wired FTDI USB-to-GPIO serial cable when available and falls back to authenticated UDP over Wi-Fi. TLS manages enrollment and connection lifetime.
 
 ## Prepare a new SD card
 
@@ -11,6 +11,16 @@ switch-remote discovers a Raspberry Pi Zero W on the local network and automatic
 5. Allow the Mac app's Local Network permission. On the same LAN, the app discovers the Pi and uses its saved PIN once. A persistent credential replaces the PIN in Keychain after enrollment. Later connections and reconnects are automatic.
 
 Open **Controllers → Change Grip/Order** on the Switch for its first pairing with the Pi. The physical gamepad pairs with the Mac; the Pi pairs with the Switch. Both may advertise as “Pro Controller”, so do not pair the Pi with the Mac in Bluetooth settings.
+
+## Wired Mac-to-Pi input
+
+Use a 3.3 V FTDI FT232R USB UART cable: Mac USB → Pi GPIO pins 6 GND, 8 GPIO14 TXD, and 10 GPIO15 RXD. Cross the signal directions (cable RX to pin 8, cable TX to pin 10). Leave cable VCC disconnected. The Pi's USB data port still goes to the Switch dock for HID output. Keep Wi-Fi configured for discovery, enrollment, and the TLS control session; pad data uses the cable once serial acknowledgments arrive.
+
+The app detects FTDI VID `0403`/PID `6001` devices with `/dev/cu.usbserial-*` names, opens 115200 8N1 raw, and reports `serial` or `udp-v2` in `switchctl status` under `controller.transport`. Set `SWITCH_REMOTE_DISABLE_SERIAL=1` when launching the app to force UDP for testing or rollback. `SWITCH_REMOTE_SERIAL_PATH=/dev/cu.usbserial-...` selects a specific FTDI port. A disconnected or unresponsive serial link falls back to UDP and retries the cable. The Pi logs `serial input ready` and a `session end` line with `serial_input` and `serial_invalid` counters. Serial round-trip timing appears in `controller.metrics.rtt` when acknowledgments have arrived.
+
+Frames are `a5 5a`, one-byte length, eight-byte big-endian sequence, the 16-byte `VGF2` state, and little-endian CRC-16/CCITT-FALSE. Input length is 24; acknowledgment length is 8 and carries the sequence. The CRC covers length through payload. Button changes go immediately; analog-only bursts are merged to at most 250 Hz so a 115200 link cannot build a backlog. The 20 ms full-state heartbeat follows the same path as UDP. The Pi shares its 350 ms neutral release and 10 s session timeout across both inputs. TLS enrollment still gates the session; serial itself relies on physical access to the dedicated cable and is not independently authenticated.
+
+The GPIO mini UART uses a fixed 250 MHz core clock to keep 115200 stable. This leaves the PL011 UART attached to Bluetooth, preserving Bluetooth as a fallback for Pi-to-Switch output. Installation backs up `/boot/firmware/config.txt` as `config.txt.vgf-serial-backup` if it changes it, and `/boot/firmware/cmdline.txt` as `cmdline.txt.vgf-serial-backup`; it removes the serial login console and masks `serial-getty@ttyS0.service`. Reboot once after installing. To roll back Pi serial setup, stop `vgf-controller.service`, restore `cmdline.txt.vgf-serial-backup`, and restore `config.txt.vgf-serial-backup` if it exists. On an SD card prepared with the app, there may be no serial config backup because UART was enabled before first boot; remove the added `enable_uart=1` and `core_freq=250` lines while retaining `dtoverlay=dwc2,dr_mode=peripheral`. The saved cmdline backup excludes Imager's one-time boot command. Unmask and enable `serial-getty@ttyS0.service`, then reboot and restart the controller service. Keep any older board configuration backups available until the wired path is verified.
 
 ## Operation
 
@@ -36,7 +46,7 @@ On the Pi, run `make -C controller/native check` for native protocol/enrollment 
 
 파이에 HDMI를 연결하거나 앱에서 PIN·SSH 주소를 입력할 필요가 없습니다. Raspberry Pi Imager에서 **Bookworm/Trixie 이상 32비트 Lite OS와 2.4GHz Wi-Fi**를 설정해 SD를 구운 뒤, 앱의 **새 파이 SD 준비…**에서 `bootfs`를 선택하세요. 앱이 임시 PIN과 인증 정보를 만들고 맥에 기억합니다. SD를 파이에 넣고 켜면 최초 설치 후 네트워크에서 자동으로 찾아 등록하며, 이후에는 키체인에 저장된 연결 키로 자동 재연결합니다.
 
-최초 설치에는 인터넷이 필요하고 몇 분 걸릴 수 있습니다. 맥에서 로컬 네트워크 접근 권한을 허용해주세요. 스위치와 처음 페어링할 때만 **컨트롤러 → 잡는 방법/순서 변경** 화면을 열면 됩니다. 버튼 입력은 UDP로 즉시 전달하며, 입력이 끊기면 자동으로 버튼을 놓습니다. 스위치 2 슬립 깨우기·진동·자이로는 지원하지 않습니다.
+최초 설치에는 인터넷이 필요하고 몇 분 걸릴 수 있습니다. 맥에서 로컬 네트워크 접근 권한을 허용해주세요. 스위치와 처음 페어링할 때만 **컨트롤러 → 잡는 방법/순서 변경** 화면을 열면 됩니다. 버튼 입력은 연결된 UART 케이블을 우선 사용하고 케이블이 없으면 UDP로 전달하며, 입력이 끊기면 자동으로 버튼을 놓습니다. 스위치 2 슬립 깨우기·진동·자이로는 지원하지 않습니다.
 
 ## Moonlight on iPhone (development)
 

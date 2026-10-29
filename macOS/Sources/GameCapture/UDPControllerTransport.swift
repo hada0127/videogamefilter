@@ -113,6 +113,9 @@ final class UDPControllerTransport {
     func send(_ value: ControllerInput) throws {
         try send(version == 2 ? Self.binaryInputPayload(value) : JSONEncoder().encode(value))
     }
+    func send(_ value: ControllerInput, sequence: UInt64) throws {
+        try send(version == 2 ? Self.binaryInputPayload(value) : JSONEncoder().encode(value), sequence: sequence)
+    }
     static func binaryInputPayload(_ value: ControllerInput) -> Data {
         let names = ["A","B","X","Y","L","R","ZL","ZR","PLUS","MINUS","HOME","CAPTURE","L_STICK_PRESS","R_STICK_PRESS","DPAD_UP","DPAD_DOWN","DPAD_LEFT","DPAD_RIGHT"]
         var flags: UInt32 = 0
@@ -127,12 +130,16 @@ final class UDPControllerTransport {
         return data
     }
     func send(_ payload: Data) throws {
-        guard descriptor >= 0, sequence < UInt64.max else { throw POSIXError(.EBADF) }
-        sequence += 1
-        let data = Self.packet(payload: payload, sequence: sequence, key: key)
+        guard sequence < UInt64.max else { throw POSIXError(.EBADF) }
+        try send(payload, sequence: sequence + 1)
+    }
+    private func send(_ payload: Data, sequence number: UInt64) throws {
+        guard descriptor >= 0, number > sequence else { throw POSIXError(.EBADF) }
+        sequence = number
+        let data = Self.packet(payload: payload, sequence: number, key: key)
         let sent = ProcessInfo.processInfo.systemUptime
         let count = data.withUnsafeBytes { Darwin.send(descriptor, $0.baseAddress, $0.count, 0) }
-        if reader != nil && count == data.count { sentAt[Int(sequence % UInt64(sentAt.count))] = (sequence, sent) }
+        if reader != nil && count == data.count { sentAt[Int(number % UInt64(sentAt.count))] = (number, sent) }
         // Loss, route changes, ICMP and the local-network permission prompt are
         // transient. The next full state repairs loss; SSH/Pi own timeouts.
         if count < 0 && [EBADF, EINVAL, EMSGSIZE].contains(errno) {

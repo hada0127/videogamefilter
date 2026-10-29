@@ -51,6 +51,40 @@ BLUEZ
         cp -n "$config" "$config.vgf-backup" || true
         printf '\n[all]\n# Video Game Filter USB controller\ndtoverlay=dwc2,dr_mode=peripheral\n' >> "$config"
     fi
+    # Keep the gadget overlay in the serial rollback backup.
+    if [ -f "$config" ] && { ! grep -q '^enable_uart=1$' "$config" || ! grep -q '^core_freq=250$' "$config"; }; then
+        cp -n "$config" "$config.vgf-serial-backup" || true
+    fi
+    # Stable mini UART clock keeps 115200 reliable while Bluetooth retains PL011.
+    if [ -f "$config" ]; then
+        if ! grep -q '^enable_uart=1$' "$config"; then printf '\n[all]\nenable_uart=1\n' >> "$config"; fi
+        if ! grep -q '^core_freq=250$' "$config"; then printf '\n[all]\ncore_freq=250\n' >> "$config"; fi
+    fi
+    cmdline=/boot/firmware/cmdline.txt
+    if [ -f "$cmdline" ]; then
+        cp -n "$cmdline" "$cmdline.vgf-serial-backup" || true
+        python3 - <<'SERIAL_CMDLINE'
+from pathlib import Path
+import os, tempfile
+path = Path('/boot/firmware/cmdline.txt')
+original = path.read_text()
+words = original.split()
+updated = ' '.join(w for w in words if not w.startswith('console=serial0,')) + '\n'
+if updated != original:
+    fd, temporary = tempfile.mkstemp(prefix='cmdline.vgf-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as output:
+            output.write(updated)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, path.stat().st_mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+SERIAL_CMDLINE
+    fi
+    systemctl disable --now serial-getty@ttyS0.service 2>/dev/null || true
+    systemctl mask serial-getty@ttyS0.service 2>/dev/null || true
     cat > /etc/systemd/system/vgf-usb-gadget.service <<'GADGET'
 [Unit]
 Description=Video Game Filter USB controller gadget

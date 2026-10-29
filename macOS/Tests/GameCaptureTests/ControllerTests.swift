@@ -38,17 +38,23 @@ final class ControllerTests: XCTestCase {
         let boot = root.appendingPathComponent("boot"), support = root.appendingPathComponent("support")
         try FileManager.default.createDirectory(at: boot, withIntermediateDirectories: true)
         try Data().write(to: boot.appendingPathComponent("config.txt"))
-        let original = "console=tty1 root=PARTUUID=example rootwait systemd.run=/boot/firmware/firstrun.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target\n"
+        let original = "console=serial0,115200 console=tty1 root=PARTUUID=example rootwait systemd.run=/boot/firmware/firstrun.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target\n"
         try original.write(to: boot.appendingPathComponent("cmdline.txt"), atomically: true, encoding: .utf8)
         let resources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("controller")
         let receipt = try PiProvisioner.prepare(boot: boot, resourceDirectory: resources, supportDirectory: support)
         XCTAssertEqual(try String(contentsOf: boot.appendingPathComponent("vgf-previous-run.txt")), "/boot/firmware/firstrun.sh")
         XCTAssertEqual(try String(contentsOf: boot.appendingPathComponent("vgf-cmdline-original.txt")), original)
+        let rollbackCommand = try String(contentsOf: boot.appendingPathComponent("cmdline.txt.vgf-serial-backup"))
+        XCTAssertTrue(rollbackCommand.contains("console=serial0,115200"))
+        XCTAssertFalse(rollbackCommand.contains("systemd.run="))
         let command = try String(contentsOf: boot.appendingPathComponent("cmdline.txt"))
         XCTAssertTrue(command.contains("root=PARTUUID=example"))
+        XCTAssertFalse(command.contains("console=serial0,"))
         XCTAssertTrue(command.contains("systemd.run=/boot/firmware/vgf-firstboot.sh"))
         let saved = try JSONDecoder().decode(PiEnrollment.self, from: Data(contentsOf: support.appendingPathComponent("pending-pi-enrollment.json")))
-        XCTAssertTrue(try String(contentsOf: boot.appendingPathComponent("config.txt")).contains("[all]\n# Video Game Filter USB controller\ndtoverlay=dwc2,dr_mode=peripheral"))
+        let bootSettings = try String(contentsOf: boot.appendingPathComponent("config.txt"))
+        XCTAssertTrue(bootSettings.contains("[all]\n# Video Game Filter USB controller\ndtoverlay=dwc2,dr_mode=peripheral"))
+        XCTAssertTrue(bootSettings.contains("enable_uart=1\ncore_freq=250"))
         XCTAssertEqual(saved.id, receipt.id)
         XCTAssertEqual(saved.pin, receipt.pin)
         XCTAssertEqual(saved.fingerprint.count, 64)
@@ -88,7 +94,7 @@ final class ControllerTests: XCTestCase {
         XCTAssertThrowsError(try PiProvisioner.prepare(boot: boot, resourceDirectory: resources, supportDirectory: support, beforeCommit: { throw NSError(domain: "InjectedDiskFull", code: 1) }))
         XCTAssertEqual(try String(contentsOf: boot.appendingPathComponent("cmdline.txt")), "console=tty1 rootwait\n")
         XCTAssertEqual(try String(contentsOf: boot.appendingPathComponent("config.txt")), "")
-        for name in ["vgf-controller", "vgf-firstboot.sh", "vgf-previous-run.txt", "vgf-cmdline-original.txt"] { XCTAssertFalse(FileManager.default.fileExists(atPath: boot.appendingPathComponent(name).path)) }
+        for name in ["vgf-controller", "vgf-firstboot.sh", "vgf-previous-run.txt", "vgf-cmdline-original.txt", "cmdline.txt.vgf-serial-backup"] { XCTAssertFalse(FileManager.default.fileExists(atPath: boot.appendingPathComponent(name).path)) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: support.appendingPathComponent("pending-pi-enrollment.json").path))
     }
 }

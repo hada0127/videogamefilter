@@ -2,6 +2,7 @@
 #include "protocol.h"
 #include "bluetooth.h"
 #include "usb.h"
+#include "serial.h"
 #include <openssl/ssl.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -109,9 +110,9 @@ static void hid_release(int fd,int usb,vgf_protocol *protocol){
     }
 }
 static void session(SSL *ssl,int tcp,int pair){
-    int lock=open("/run/videogamefilter-controller.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600),udp=-1;
+    int lock=open("/run/videogamefilter-controller.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600),udp=-1,serial=-1;
     vgf_bt bt={.ctrl=-1,.itr=-1,.listen_ctrl=-1,.listen_itr=-1};vgf_queue queue={0};vgf_protocol protocol={0};unsigned char key[32]={0};
-    uint64_t sequence=0,accepted=0,invalid=0,reports=0,blocked=0,udp_gaps=0;double max_gap=0,last_sent=0,max_udp_gap=0,last_udp=0;int connected=0,use_usb=0,listening=0;
+    uint64_t sequence=0,accepted=0,serial_accepted=0,serial_invalid=0,invalid=0,reports=0,blocked=0,udp_gaps=0;double max_gap=0,last_sent=0,max_udp_gap=0,last_udp=0;int connected=0,use_usb=0,listening=0;vgf_serial_parser serial_parser={0};uint64_t serial_ack_sequence=0;
     if(lock<0||flock(lock,LOCK_EX|LOCK_NB)<0){send_blocking(ssl,"{\"type\":\"error\",\"message\":\"다른 컨트롤러 연결이 사용 중입니다.\"}\n");goto done;}
     if(send_blocking(ssl,"{\"type\":\"status\",\"state\":\"starting\",\"wake\":false}\n"))goto done;
     if(!pair && (bt.itr=vgf_usb_open())>=0){use_usb=1;connected=1;
@@ -131,13 +132,14 @@ static void session(SSL *ssl,int tcp,int pair){
     socklen_t sz=sizeof(sa);if(getsockname(udp,(struct sockaddr*)&sa,&sz)<0||RAND_bytes(key,32)!=1)goto done;
     unsigned char encoded[45];EVP_EncodeBlock(encoded,key,32);char msg[512];snprintf(msg,sizeof(msg),"{\"type\":\"transport\",\"version\":2,\"port\":%u,\"key\":\"%s\"}\n",ntohs(sa.sin_port),encoded);
     if(send_blocking(ssl,msg)||set_nonblocking(tcp)<0)goto done;
+    serial=vgf_serial_open("/dev/serial0");if(serial>=0)fputs("serial input ready at 115200\n",stderr);
     double started=now_s(),next_report=started,next_status=started,last_input=started,out_started=0,next_usb_check=0;
     char output[512]={0};size_t output_len=0,output_at=0;int output_want_read=0;
     uint8_t pending_report[50];double report_started=0;int have_report=0;vgf_input current={0};
     uint64_t ack_sequence=0;struct sockaddr_in ack_to;
     while(!stopping){
         double now=now_s();
-        struct pollfd fds[5]={{tcp,POLLIN,0},{udp,POLLIN,0},{bt.ctrl,POLLIN,0},{bt.itr,POLLIN,0},{-1,0,0}};
+        struct pollfd fds[5]={{tcp,POLLIN,0},{udp,POLLIN,0},{bt.ctrl,POLLIN,0},{bt.itr,POLLIN,0},{serial,POLLIN,0}};
         if(output_len&&!output_want_read)fds[0].events|=POLLOUT;
         /* A USB completion wakes POLLOUT immediately. Do not quantize retries
            into another heartbeat; Bluetooth retains its bounded timed retry. */
@@ -145,7 +147,7 @@ static void session(SSL *ssl,int tcp,int pair){
         if(!connected){if(listening){fds[2].fd=bt.listen_ctrl;fds[3].fd=bt.listen_itr;}else{fds[2].events|=POLLOUT;fds[3].events|=POLLOUT;}}
 
         int wait_ms=(int)ceil((next_report-now)*1000);if(wait_ms<0)wait_ms=0;if(wait_ms>8||!connected||(use_usb&&have_report))wait_ms=8;
-        int pr=poll(fds,4,wait_ms);if(pr<0&&errno!=EINTR)break;now=now_s();
+        int pr=poll(fds,5,wait_ms);if(pr<0&&errno!=EINTR)break;now=now_s();
         if(fds[0].revents&(POLLERR|POLLHUP|POLLNVAL))break;
         if((fds[0].revents&POLLIN)||SSL_pending(ssl)){
             char junk[1024];int n=SSL_read(ssl,junk,sizeof(junk));if(n<=0){int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;}
@@ -157,6 +159,22 @@ static void session(SSL *ssl,int tcp,int pair){
                 vgf_enqueue(&queue,&v,arrived);last_input=arrived;accepted++;
                 if(fromlen==sizeof(from)&&from.sin_family==AF_INET){ack_sequence=sequence;ack_to=from;}
                 if(use_usb||(protocol.vibration&&protocol.player)){double due=fmax(now,last_sent+(use_usb?.001:.004));if(due<next_report)next_report=due;}
+            }
+        }
+        if(serial>=0 && (fds[4].revents&(POLLERR|POLLHUP|POLLNVAL))){close(serial);serial=-1;fputs("serial input disconnected; UDP remains active\n",stderr);}
+        if(serial>=0 && (fds[4].revents&POLLIN)){
+            uint8_t bytes[256];ssize_t n=read(serial,bytes,sizeof(bytes));
+            if(n<0 && errno!=EAGAIN && errno!=EWOULDBLOCK){close(serial);serial=-1;}
+            else for(ssize_t i=0;i<n;i++){
+                vgf_input v;uint64_t seq;
+                double arrived=now_s();int result=vgf_serial_byte(&serial_parser,bytes[i],&v,&seq);
+                if(result<0){serial_invalid++;continue;}if(!result)continue;
+                /* The serial parser already checks its own increasing sequence.
+                   A Wi-Fi copy can arrive first; acknowledge that older serial
+                   frame after HID delivery without replaying its stale state. */
+                serial_ack_sequence=seq;if(seq<=sequence)continue;
+                sequence=seq;vgf_enqueue(&queue,&v,arrived);last_input=arrived;accepted++;serial_accepted++;
+                if(use_usb||(protocol.vibration&&protocol.player)){double due=fmax(arrived,last_sent+(use_usb?.001:.004));if(due<next_report)next_report=due;}
             }
         }
         if(!connected){
@@ -196,6 +214,7 @@ static void session(SSL *ssl,int tcp,int pair){
         /* One ack per iteration, for the newest accepted datagram, once every queued input has
            been written to HID. Earlier sequences in the batch go unacknowledged. Old apps never read acks. */
         if(ack_sequence&&!queue.count&&!have_report){uint8_t ack[VGF_ACK_SIZE];vgf_ack(key,ack_sequence,ack);(void)sendto(udp,ack,sizeof(ack),MSG_DONTWAIT,(struct sockaddr*)&ack_to,sizeof(ack_to));ack_sequence=0;}
+        if(serial_ack_sequence&&!queue.count&&!have_report&&serial>=0){uint8_t ack[VGF_SERIAL_ACK];vgf_serial_ack(serial_ack_sequence,ack);ssize_t sent=write(serial,ack,sizeof(ack));if(sent>0)serial_ack_sequence=0;}
         if(now>=next_status&&!output_len){status_line(output,sizeof(output),connected?"connected":(listening?"connecting":"reconnecting"),use_usb);output_len=strlen(output);output_at=0;out_started=now;next_status=now+.5;}
         if(output_len){int n=SSL_write(ssl,output+output_at,(int)(output_len-output_at));if(n>0){output_at+=(size_t)n;output_want_read=0;if(output_at==output_len)output_at=output_len=0;}
             else {int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;output_want_read=e==SSL_ERROR_WANT_READ;}
@@ -204,8 +223,8 @@ static void session(SSL *ssl,int tcp,int pair){
     }
  done:
     if(connected&&bt.itr>=0)hid_release(bt.itr,use_usb,&protocol);
-    fprintf(stderr,"session end: input=%llu invalid=%llu reports=%llu blocked=%llu max_report_gap_ms=%.2f dropped_edges=%llu max_udp_gap_ms=%.2f udp_gaps_over_40ms=%llu\n",(unsigned long long)accepted,(unsigned long long)invalid,(unsigned long long)reports,(unsigned long long)blocked,max_gap*1000,(unsigned long long)queue.discarded,max_udp_gap*1000,(unsigned long long)udp_gaps);
-    vgf_bt_close(&bt);if(udp>=0)close(udp);OPENSSL_cleanse(key,32);if(lock>=0)close(lock);
+    fprintf(stderr,"session end: input=%llu invalid=%llu reports=%llu blocked=%llu max_report_gap_ms=%.2f dropped_edges=%llu max_udp_gap_ms=%.2f udp_gaps_over_40ms=%llu serial_input=%llu serial_invalid=%llu\n",(unsigned long long)accepted,(unsigned long long)invalid,(unsigned long long)reports,(unsigned long long)blocked,max_gap*1000,(unsigned long long)queue.discarded,max_udp_gap*1000,(unsigned long long)udp_gaps,(unsigned long long)serial_accepted,(unsigned long long)serial_invalid);
+    vgf_bt_close(&bt);if(udp>=0)close(udp);if(serial>=0)close(serial);OPENSSL_cleanse(key,32);if(lock>=0)close(lock);
 }
 static void client(SSL_CTX *ctx,int fd){
     struct timeval timeout={10,0};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
