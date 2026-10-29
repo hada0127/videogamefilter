@@ -33,7 +33,9 @@ struct MCPServer {
                   "holdMs": hold, "gapMs": gap, "wait": wait]),
             tool("switch_release", "Release every agent-held button and stick now."),
             tool("switch_controller_disconnect", "Release inputs and detach the Pi USB controller from the Switch."),
-            tool("switch_controller_reconnect", "Reattach the Pi USB controller to the Switch.")
+            tool("switch_controller_reconnect", "Reattach the Pi USB controller to the Switch."),
+            tool("switch_source", "Select controller source. None releases input and detaches USB; gamepad or Moonlight reattaches USB.",
+                 ["source": ["type": "string", "enum": ["none", "gamepad", "moonlight"]] as [String: Any]], required: ["source"])
         ]
     }
 
@@ -126,6 +128,10 @@ struct MCPServer {
             try allow([]); outcome = commands.release()
         case "switch_controller_disconnect", "switch_controller_reconnect":
             try allow([]); outcome = commands.controller(name == "switch_controller_disconnect" ? "detach" : "attach")
+        case "switch_source":
+            try allow(["source"])
+            guard let source = arguments["source"] as? String, ["none", "gamepad", "moonlight"].contains(source) else { throw RPCError(code: -32602, message: "source must be none, gamepad or moonlight") }
+            outcome = commands.source(source)
         case "switch_snapshot":
             try allow(["maxWidth"])
             let width = try integer("maxWidth", default: Self.snapshotWidth, range: AgentProtocol.snapshotWidthRange)

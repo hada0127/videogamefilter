@@ -159,6 +159,46 @@ final class ControllerTests: XCTestCase {
         XCTAssertFalse(ControllerModel.shouldClearReconnectIntent(origin: old, current: replacement, connected: false))
         XCTAssertTrue(ControllerModel.shouldClearReconnectIntent(origin: old, current: replacement, connected: true))
     }
+    @MainActor func testExplicitSourceUSBTransitions() {
+        XCTAssertEqual(ControllerModel.sourceUSBAction(for: "detach", detached: false), "detach")
+        XCTAssertNil(ControllerModel.sourceUSBAction(for: "detach", detached: true))
+        XCTAssertEqual(ControllerModel.sourceUSBAction(for: "attach", detached: true), "attach")
+        XCTAssertNil(ControllerModel.sourceUSBAction(for: "attach", detached: false))
+        XCTAssertNil(ControllerModel.sourceUSBAction(for: "detach", detached: nil))
+        XCTAssertNil(ControllerModel.sourceUSBAction(for: "attach", detached: nil))
+        // The Pi's "not attached" USB state also occurs when undocked; session
+        // detach state, rather than USB state, determines whether to reattach.
+        XCTAssertEqual(ControllerModel.sourceUSBAction(for: "attach", detached: true, lastRequested: "detach"), "attach")
+        XCTAssertEqual(ControllerModel.sourceUSBAction(for: "detach", detached: false, lastRequested: "attach"), "detach")
+        XCTAssertTrue(ControllerModel.shouldDeferSourceUSBAction(intent: "detach", lastRequested: "attach"))
+        XCTAssertFalse(ControllerModel.shouldDeferSourceUSBAction(intent: "attach", lastRequested: "detach"))
+    }
+    @MainActor func testSourceChoiceSurvivesUnavailableGamepad() {
+        let originalSource = UserDefaults.standard.object(forKey: "controller.source")
+        let originalGamepad = UserDefaults.standard.object(forKey: "controller.gamepad")
+        let originalMoonlight = UserDefaults.standard.object(forKey: "controller.moonlight")
+        defer {
+            for (key, value) in [("controller.source", originalSource), ("controller.gamepad", originalGamepad), ("controller.moonlight", originalMoonlight)] {
+                if let value { UserDefaults.standard.set(value, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+        }
+        UserDefaults.standard.set("gamepad", forKey: "controller.source")
+        UserDefaults.standard.set("saved pad", forKey: "controller.gamepad")
+        let store = PiDeviceStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), credentialSave: { _, _ in true })
+        let model = ControllerModel(startDiscovery: false, controllerProvider: { [] }, store: store)
+        model.selectController("")
+        XCTAssertEqual(model.pickerSelection, "")
+        XCTAssertTrue(model.usbStatusText.contains("unavailable"))
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "controller.gamepad"), "saved pad")
+        XCTAssertEqual((model.agentStatus()["controller"] as? [String: Any])?["source"] as? String, "none")
+        guard case .success = model.selectSource("gamepad") else { return XCTFail("gamepad source rejected") }
+        XCTAssertTrue(model.selected.isEmpty)
+        XCTAssertEqual(model.pickerSelection, "saved-gamepad")
+        XCTAssertEqual((model.agentStatus()["controller"] as? [String: Any])?["source"] as? String, "gamepad")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "controller.gamepad"), "saved pad")
+        model.refresh()
+        XCTAssertEqual((model.agentStatus()["controller"] as? [String: Any])?["source"] as? String, "gamepad")
+    }
     @MainActor func testObsoleteSessionCannotPublishUSBState() {
         let store = PiDeviceStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), credentialSave: { _, _ in true })
         let model = ControllerModel(startDiscovery: false, controllerProvider: { [] }, store: store)

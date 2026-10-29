@@ -10,6 +10,7 @@ struct AgentControlHost {
     var input: (AgentInputArgs) -> Result<[String: Any], AgentError>
     var release: () -> [String: Any]
     var usb: (String) -> Result<[String: Any], AgentError>
+    var source: (String) -> Result<[String: Any], AgentError>
     var frame: () -> Result<(buffer: CVPixelBuffer, seq: UInt64, arrivedAt: Double), AgentError>
 }
 
@@ -282,6 +283,11 @@ final class AgentControlServer: @unchecked Sendable {
                 reply(client, id: id, .failure(AgentError(.badRequest, "action must be detach or attach"))); return
             }
             onHost(client, id: id) { host.usb(action) }
+        case "source":
+            guard args.count == 1, let source = args["source"] as? String, ["none", "gamepad", "moonlight"].contains(source) else {
+                reply(client, id: id, .failure(AgentError(.badRequest, "source must be none, gamepad or moonlight"))); return
+            }
+            onHost(client, id: id) { host.source(source) }
         case "snapshot":
             var maxWidth = AgentProtocol.defaultSnapshotWidth
             if let raw = args["maxWidth"] {
@@ -292,7 +298,7 @@ final class AgentControlServer: @unchecked Sendable {
             }
             snapshot(client, id: id, maxWidth: maxWidth)
         default:
-            reply(client, id: id, .failure(AgentError(.unknownCommand, "unknown command; use status, snapshot, input, release or controller")))
+            reply(client, id: id, .failure(AgentError(.unknownCommand, "unknown command; use status, snapshot, input, release, controller or source")))
         }
     }
 
@@ -369,6 +375,7 @@ private struct Box<T>: @unchecked Sendable { let value: T; init(_ value: T) { se
             input: { args in MainActor.assumeIsolated { Box(controller.agentInput(args)) }.value },
             release: { MainActor.assumeIsolated { Box(controller.agentRelease()) }.value },
             usb: { action in MainActor.assumeIsolated { Box(controller.usbAction(action)) }.value },
+            source: { value in MainActor.assumeIsolated { Box(controller.selectSource(value)) }.value },
             frame: { MainActor.assumeIsolated { Box(frame(capture: capture)) }.value })
         let server = AgentControlServer(host: host)
         do {

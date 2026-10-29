@@ -31,6 +31,7 @@ struct Commands {
     func status() -> Outcome { call("status") }
     func release() -> Outcome { call("release") }
     func controller(_ action: String) -> Outcome { call("controller", ["action": action]) }
+    func source(_ value: String) -> Outcome { call("source", ["source": value]) }
 
     func snapshot(maxWidth: Int?, out: String?) -> Outcome {
         var outcome = call("snapshot", maxWidth.map { ["maxWidth": $0] } ?? [:])

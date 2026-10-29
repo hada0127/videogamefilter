@@ -46,6 +46,7 @@ final class SwitchctlTests: XCTestCase {
         XCTAssertEqual(try run(["input", "--lx", "2"]).code, 2)
         XCTAssertEqual(try run(["input", "--hold-ms", "60001"]).code, 2)
         XCTAssertEqual(try run(["snapshot", "--max-width", "10"]).code, 2)
+        XCTAssertEqual(try run(["source", "invalid"]).code, 2)
 
         let fake = FakeAgentHost(); fake.frame = AgentControlServerTests.bgra(width: 1280, height: 720)
         let server = try start(fake); defer { server.stop() }
@@ -53,6 +54,8 @@ final class SwitchctlTests: XCTestCase {
         XCTAssertEqual(status.code, 0); XCTAssertEqual(status.lines.count, 1)
         XCTAssertEqual(status.lines[0]["ok"] as? Bool, true)
         XCTAssertEqual(try run(["release"]).code, 0)
+        let source = try run(["source", "none"])
+        XCTAssertEqual((source.lines[0]["result"] as? [String: Any])?["source"] as? String, "none")
         let out = root.appendingPathComponent("copy.png").path
         let snapshot = try run(["snapshot", "--max-width", "320", "--out", out])
         XCTAssertEqual(snapshot.code, 0)
@@ -103,7 +106,7 @@ final class SwitchctlTests: XCTestCase {
 
         XCTAssertEqual((byID[1]?["result"] as? [String: Any])?["protocolVersion"] as? String, "2025-06-18")
         let tools = ((byID[2]?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }
-        XCTAssertEqual(tools, ["switch_status", "switch_snapshot", "switch_press", "switch_input", "switch_release", "switch_controller_disconnect", "switch_controller_reconnect"])
+        XCTAssertEqual(tools, ["switch_status", "switch_snapshot", "switch_press", "switch_input", "switch_release", "switch_controller_disconnect", "switch_controller_reconnect", "switch_source"])
 
         let snapshot = try XCTUnwrap(byID[3]?["result"] as? [String: Any])
         XCTAssertEqual(snapshot["isError"] as? Bool, false)

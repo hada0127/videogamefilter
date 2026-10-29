@@ -34,6 +34,7 @@ final class FakeAgentHost: @unchecked Sendable {
             },
             release: { [self] in lock.lock(); releases += 1; lock.unlock(); return ["released": true] },
             usb: { action in .success(["requested": action]) },
+            source: { source in .success(["source": source]) },
             frame: { [self] in
                 lock.lock(); let gate = gate, frame = frame; lock.unlock()
                 if let gate { entered.signal(); gate.wait() }

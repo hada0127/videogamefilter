@@ -7,6 +7,9 @@ import AgentControlProtocol
 @MainActor final class ControllerModel: ObservableObject {
     @Published private(set) var controllers: [GCController] = []
     @Published var selected = "" { didSet { configureInputHandlers(reset: true); configureMoonlight() } }
+    var pickerSelection: String {
+        selected.isEmpty && UserDefaults.standard.string(forKey: "controller.source") == "gamepad" ? "saved-gamepad" : selected
+    }
     @Published private(set) var foundPis: [DiscoveredPi] = []
     @Published var selectedPi = "" { didSet { if oldValue != selectedPi { disconnect(manual: false); reconnectIfPossible() } } }
     @Published var automatic = true { didSet { UserDefaults.standard.set(automatic, forKey: "pi.automatic"); if automatic { reconnectIfPossible() } else { disconnect(manual: false) } } }
@@ -27,6 +30,11 @@ import AgentControlProtocol
     private var pairingRequested = false
     private var reconnectAfterUSBAction = false
     private var reconnectOrigin: UUID?
+    /// A source choice is an intent, independent of transient gamepad availability.
+    private var pendingSourceUSBAction: String?
+    private var lastRequestedUSBAction: String?
+    private var sourceUSBRequestInFlight: String?
+    private var piDetached: Bool?
     private let logger = Logger(subsystem: "net.tarucy.videogamefilter.native", category: "Controller")
     private var loggedState = ""
     @Published var positional = false { didSet { UserDefaults.standard.set(positional, forKey: "controller.positional"); inputPipeline.setPositional(positional) } }
@@ -77,6 +85,7 @@ import AgentControlProtocol
             configureInputHandlers(reset: true); configureMoonlight()
         }
         if UserDefaults.standard.string(forKey: "controller.source") == "none" { allowAutomaticInput = false }
+        pendingSourceUSBAction = UserDefaults.standard.string(forKey: "controller.source") == "none" ? "detach" : "attach"
         refresh()
         automatic = UserDefaults.standard.object(forKey: "pi.automatic") as? Bool ?? true
         preferredPi = UserDefaults.standard.string(forKey: "pi.selected") ?? deviceStore.devices.first?.id ?? ""
@@ -119,10 +128,28 @@ import AgentControlProtocol
         configureInputHandlers()
     }
     func selectController(_ id: String) {
-        UserDefaults.standard.set(id == Self.moonlightID, forKey: "controller.moonlight")
-        UserDefaults.standard.set(id.isEmpty ? "none" : (id == Self.moonlightID ? "moonlight" : "gamepad"), forKey: "controller.source")
-        UserDefaults.standard.set(controllers.first(where: { self.id($0) == id })?.vendorName, forKey: "controller.gamepad")
-        allowAutomaticInput = !id.isEmpty && id != Self.moonlightID; selected = id
+        let source = id.isEmpty ? "none" : (id == Self.moonlightID ? "moonlight" : "gamepad")
+        if let gamepad = controllers.first(where: { self.id($0) == id }) {
+            UserDefaults.standard.set(gamepad.vendorName, forKey: "controller.gamepad")
+        }
+        setSource(source, selectedID: id)
+    }
+    func selectSource(_ source: String) -> Result<[String: Any], AgentError> {
+        guard ["none", "gamepad", "moonlight"].contains(source) else {
+            return .failure(AgentError(.badRequest, "source must be none, gamepad or moonlight"))
+        }
+        let saved = UserDefaults.standard.string(forKey: "controller.gamepad")
+        let gamepad = controllers.first(where: { $0.vendorName == saved }) ?? controllers.first
+        let id = source == "moonlight" ? Self.moonlightID : (source == "gamepad" ? gamepad.map { self.id($0) } ?? "" : "")
+        setSource(source, selectedID: id)
+        return .success(["source": source, "usbActionPending": pendingSourceUSBAction != nil])
+    }
+    private func setSource(_ source: String, selectedID: String) {
+        UserDefaults.standard.set(source == "moonlight", forKey: "controller.moonlight")
+        UserDefaults.standard.set(source, forKey: "controller.source")
+        allowAutomaticInput = source == "gamepad"; selected = selectedID
+        pendingSourceUSBAction = source == "none" ? "detach" : "attach"
+        applySourceUSBAction()
     }
     func selectPi(_ id: String) {
         preferredPi = id
@@ -158,6 +185,7 @@ import AgentControlProtocol
         if pair { pairingRequested = true; if running { disconnect(manual: false) } }
         guard !running, let endpoint = foundPis.first(where: { $0.id == selectedPi }),
               let device = deviceStore.devices.first(where: { $0.id == selectedPi }) else { return }
+        if UserDefaults.standard.string(forKey: "controller.source") == "none" { pendingSourceUSBAction = "detach" }
         retry?.cancel(); retry = nil
         let token = UUID(); generation = token
         let transport = PiControlBridge(); bridge = transport; activeEndpoint = endpoint
@@ -174,6 +202,11 @@ import AgentControlProtocol
                     if let message { self.logger.error("Pi connection detail: \(message, privacy: .public)") }
                 }
                 self.setLinkConnected(state == "connected", backend: message)
+                if ["connected", "connecting", "reconnecting", "detached"].contains(state) {
+                    self.piDetached = state == "detached"
+                    if self.piDetached == true && self.sourceUSBRequestInFlight == "detach" { self.sourceUSBRequestInFlight = nil }
+                    self.applySourceUSBAction()
+                }
                 if self.connected {
                     self.pairingRequested = false
                     if Self.shouldClearReconnectIntent(origin: self.reconnectOrigin, current: token, connected: true) {
@@ -190,7 +223,9 @@ import AgentControlProtocol
                         }
                     }
                 } else {
-                    self.status = state == "connected" ? "스위치 연결됨 · " + (message == "usb" ? "USB" : "Bluetooth") : (state == "enrolled" ? "파이 등록 완료" : "스위치 연결 대기 중…")
+                    self.status = state == "connected" ? "스위치 연결됨 · " + (message == "usb" ? "USB" : "Bluetooth") :
+                        (state == "detached" ? (UserDefaults.standard.string(forKey: "controller.source") == "none" ? "USB 연결 해제됨 · 입력 사용 안 함" : "USB 연결 해제됨") :
+                        (state == "enrolled" ? "파이 등록 완료" : "스위치 연결 대기 중…"))
                 }
             }
         }
@@ -208,10 +243,40 @@ import AgentControlProtocol
         guard generation == token else { return }
         usbState = value
     }
+    static func sourceUSBAction(for intent: String?, detached: Bool?, lastRequested: String? = nil) -> String? {
+        guard let intent, let detached else { return nil }
+        if let lastRequested, lastRequested != intent { return intent }
+        if intent == "detach" { return detached ? nil : "detach" }
+        return detached ? "attach" : nil
+    }
+    static func shouldDeferSourceUSBAction(intent: String, lastRequested: String?) -> Bool {
+        lastRequested == "attach" && intent == "detach"
+    }
+    private func applySourceUSBAction() {
+        guard let pendingSourceUSBAction, running, usbState != "unavailable" else { return }
+        // Attach ends the Pi session; send the newest choice on the replacement session.
+        if Self.shouldDeferSourceUSBAction(intent: pendingSourceUSBAction, lastRequested: lastRequestedUSBAction) { return }
+        guard let piDetached else { return }
+        let action = Self.sourceUSBAction(for: pendingSourceUSBAction, detached: piDetached, lastRequested: lastRequestedUSBAction)
+        if let action {
+            guard case .success = usbAction(action) else { return }
+            sourceUSBRequestInFlight = action
+        }
+        self.pendingSourceUSBAction = nil
+    }
+    var usbStatusText: String {
+        let state = usbState == "not attached" ? "연결 해제됨" : (usbState == "configured" ? "연결됨" : usbState)
+        if running && pendingSourceUSBAction == "detach" { return "USB: 연결 해제 대기 중 (\(state))" }
+        if running && pendingSourceUSBAction == "attach" { return "USB: 다시 연결 대기 중 (\(state))" }
+        if sourceUSBRequestInFlight == "detach" { return "USB: 연결 해제 요청됨 (\(state))" }
+        if sourceUSBRequestInFlight == "attach" { return "USB: 다시 연결 요청됨 (\(state))" }
+        return "USB: \(state)"
+    }
     func disconnect(manual: Bool = true) {
         if manual { pairingRequested = false; reconnectAfterUSBAction = false; reconnectOrigin = nil; automatic = false }
         retry?.cancel(); retry = nil
         generation = UUID(); inputPipeline.setSession(nil); bridge?.stop(); bridge = nil; activeEndpoint = nil
+        lastRequestedUSBAction = nil; sourceUSBRequestInFlight = nil; piDetached = nil
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         running = false; connected = false; backend = nil; liveInput.value = .neutral; status = "연결 안 됨"
         usbState = "unavailable"
@@ -221,6 +286,7 @@ import AgentControlProtocol
         guard running, usbState != "unavailable", let bridge = bridge as? PiControlBridge else { return .failure(AgentError(.notConnected, "Pi control session is not ready")) }
         if action == "detach" { inputPipeline.clearAgent(); bridge.send(.neutral); setLinkConnected(false, backend: nil) }
         if action == "attach" { pairingRequested = false; reconnectAfterUSBAction = true; reconnectOrigin = generation }
+        lastRequestedUSBAction = action
         bridge.controlUSB(action)
         return .success(["requested": action])
     }
@@ -232,7 +298,7 @@ import AgentControlProtocol
 
     /// Controller, metrics and agent sections of the agent `status` result. No hosts, keys or tokens.
     func agentStatus() -> [String: Any] {
-        let source = selected == Self.moonlightID ? "moonlight" : (selected.isEmpty ? "none" : "gamepad")
+        let source = UserDefaults.standard.string(forKey: "controller.source") ?? (selected == Self.moonlightID ? "moonlight" : (selected.isEmpty ? "none" : "gamepad"))
         let transport = running ? bridge?.transportMetrics() : nil
         let metrics = inputPipeline.metrics
         var rtt: Any = NSNull()
@@ -295,8 +361,10 @@ struct ControllerSettingsView: View {
         ScrollView {
         VStack(alignment: .leading, spacing: 28) {
             controllerSection("입력 장치") {
-                ClassicPicker(title: "입력 장치", selection: Binding(get: { model.selected }, set: { model.selectController($0) }),
-                              options: [("", "입력 사용 안 함"), (ControllerModel.moonlightID, "문라이트 · 선샤인")] + model.controllers.map { (model.id($0), $0.vendorName ?? "Controller") }, enabled: true)
+                ClassicPicker(title: "입력 장치", selection: Binding(get: { model.pickerSelection }, set: {
+                    if $0 == "saved-gamepad" { _ = model.selectSource("gamepad") } else { model.selectController($0) }
+                }),
+                              options: [("", "입력 사용 안 함")] + (model.pickerSelection == "saved-gamepad" ? [("saved-gamepad", "저장된 게임패드 · 연결 대기")] : []) + [(ControllerModel.moonlightID, "문라이트 · 선샤인")] + model.controllers.map { (model.id($0), $0.vendorName ?? "Controller") }, enabled: true)
                     .frame(height: 72)
                 if model.selected == ControllerModel.moonlightID {
                     Text("연결된 문라이트의 첫 번째 패드로 조작합니다. 앱이 뒤에 있어도 입력을 전달합니다.").font(AppFonts.font(22)).foregroundStyle(.secondary)
@@ -323,7 +391,7 @@ struct ControllerSettingsView: View {
                     Button("스위치 새로 페어링") { model.connect(pair: true) }.disabled(!model.canConnect)
                 }
                 Text(model.status)
-                Text("USB: \(model.usbState)")
+                Text(model.usbStatusText)
                 if !model.detail.isEmpty { Text(model.detail).font(AppFonts.font(22)).foregroundStyle(.red).textSelection(.enabled) }
                 Button(model.preparing ? "SD 준비 중…" : "새 파이 SD 준비…") { model.prepareSD() }.disabled(model.preparing)
                 if !model.preparationMessage.isEmpty { Text(model.preparationMessage).font(AppFonts.font(22)).textSelection(.enabled) }
