@@ -7,11 +7,11 @@ if [ "$(id -u)" != 0 ]; then
     exit 1
 fi
 apt-get update
-apt-get install -y bluez avahi-daemon iw build-essential pkg-config libssl-dev libjson-c-dev libdbus-1-dev libbluetooth-dev
+apt-get install -y bluez avahi-daemon iw util-linux build-essential pkg-config libssl-dev libjson-c-dev libdbus-1-dev libbluetooth-dev
 install -d -m 755 /opt/videogamefilter-controller
 make -C native clean all check
 install -d -m 755 /opt/videogamefilter-controller/native
-install -m 755 native/vgf-controller native/usb-gadget.sh /opt/videogamefilter-controller/native/
+install -m 755 native/vgf-controller native/usb-gadget.sh native/usb-control.sh native/usb-watch.sh /opt/videogamefilter-controller/native/
 install -m 644 native/switch-controller.xml /opt/videogamefilter-controller/native/
 install -m 644 vendor/NXBT-LICENSE /opt/videogamefilter-controller/native/
 chown -R root:root /opt/videogamefilter-controller
@@ -97,6 +97,19 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 GADGET
+    cat > /etc/systemd/system/vgf-usb-watch.service <<'WATCH'
+[Unit]
+Description=Video Game Filter USB gadget reattach watchdog
+Requires=vgf-usb-gadget.service
+After=vgf-usb-gadget.service
+[Service]
+Type=simple
+ExecStart=/opt/videogamefilter-controller/native/usb-watch.sh
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+WATCH
     cat > /etc/systemd/system/vgf-controller.service <<'UNIT'
 [Unit]
 Description=Video Game Filter controller service
@@ -121,6 +134,8 @@ UNIT
     systemctl daemon-reload
     systemctl restart bluetooth.service
     systemctl enable --now vgf-usb-gadget.service
+    systemctl enable vgf-usb-watch.service
+    systemctl restart vgf-usb-watch.service
     systemctl enable --now avahi-daemon.service
     systemctl enable vgf-controller.service
     systemctl restart vgf-controller.service

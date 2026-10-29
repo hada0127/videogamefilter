@@ -31,7 +31,9 @@ struct MCPServer {
             tool("switch_input", "Send buttons and stick positions (ly/ry positive is up) held for holdMs, then neutral. Returns immediately unless wait is true; a new input before the hold ends replaces it without a release in between.",
                  ["buttons": buttons, "lx": axis("Left stick X"), "ly": axis("Left stick Y"), "rx": axis("Right stick X"), "ry": axis("Right stick Y"),
                   "holdMs": hold, "gapMs": gap, "wait": wait]),
-            tool("switch_release", "Release every agent-held button and stick now.")
+            tool("switch_release", "Release every agent-held button and stick now."),
+            tool("switch_controller_disconnect", "Release inputs and detach the Pi USB controller from the Switch."),
+            tool("switch_controller_reconnect", "Reattach the Pi USB controller to the Switch.")
         ]
     }
 
@@ -122,6 +124,8 @@ struct MCPServer {
             try allow([]); outcome = commands.status()
         case "switch_release":
             try allow([]); outcome = commands.release()
+        case "switch_controller_disconnect", "switch_controller_reconnect":
+            try allow([]); outcome = commands.controller(name == "switch_controller_disconnect" ? "detach" : "attach")
         case "switch_snapshot":
             try allow(["maxWidth"])
             let width = try integer("maxWidth", default: Self.snapshotWidth, range: AgentProtocol.snapshotWidthRange)

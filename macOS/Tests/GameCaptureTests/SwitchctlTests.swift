@@ -103,7 +103,7 @@ final class SwitchctlTests: XCTestCase {
 
         XCTAssertEqual((byID[1]?["result"] as? [String: Any])?["protocolVersion"] as? String, "2025-06-18")
         let tools = ((byID[2]?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }
-        XCTAssertEqual(tools, ["switch_status", "switch_snapshot", "switch_press", "switch_input", "switch_release"])
+        XCTAssertEqual(tools, ["switch_status", "switch_snapshot", "switch_press", "switch_input", "switch_release", "switch_controller_disconnect", "switch_controller_reconnect"])
 
         let snapshot = try XCTUnwrap(byID[3]?["result"] as? [String: Any])
         XCTAssertEqual(snapshot["isError"] as? Bool, false)

@@ -91,7 +91,16 @@ static json_object *read_json(SSL *ssl){
     while(used<sizeof(buf)-1&&now_s()<deadline){int n=SSL_read(ssl,buf+used,1);if(n!=1)return NULL;if(buf[used]=='\n'){buf[used]=0;json_tokener *t=json_tokener_new();json_object *o=json_tokener_parse_ex(t,buf,(int)used);int ok=json_tokener_get_error(t)==json_tokener_success&&json_object_is_type(o,json_type_object)&&json_tokener_get_parse_end(t)==used;json_tokener_free(t);if(!ok){if(o)json_object_put(o);return NULL;}return o;}used++;}return NULL;
 }
 static int send_blocking(SSL *ssl,const char *s){size_t n=strlen(s),off=0;while(off<n){int r=SSL_write(ssl,s+off,(int)(n-off));if(r<=0)return -1;off+=(size_t)r;}return 0;}
-static void status_line(char *out,size_t n,const char *state,int usb){snprintf(out,n,"{\"type\":\"status\",\"state\":\"%s\",\"backend\":\"%s\",\"wake\":false}\n",state,usb?"usb":"bluetooth");}
+static void status_line(char *out,size_t n,const char *state,int usb){snprintf(out,n,"{\"type\":\"status\",\"state\":\"%s\",\"backend\":\"%s\",\"usbState\":\"%s\",\"wake\":false}\n",state,usb?"usb":"bluetooth",vgf_usb_state());}
+#ifndef VGF_USB_COMMAND
+#define VGF_USB_COMMAND usb_command
+static int usb_command(const char *action){
+    pid_t pid=fork();if(pid<0)return -1;
+    if(pid==0){execl("/opt/videogamefilter-controller/native/usb-control.sh","usb-control.sh",action,(char*)NULL);_exit(127);}
+    int status=0;while(waitpid(pid,&status,0)<0){if(errno!=EINTR)return -1;}
+    return WIFEXITED(status)&&WEXITSTATUS(status)==0?0:-1;
+}
+#endif
 static int set_nonblocking(int fd){int flags=fcntl(fd,F_GETFL);return flags<0?-1:fcntl(fd,F_SETFL,flags|O_NONBLOCK);}
 static int console_address(char out[18]){char path[512];path_for(path,"console");FILE *f=fopen(path,"r");if(!f)return -1;char buf[64];int ok=fgets(buf,sizeof(buf),f)!=NULL;fclose(f);if(!ok)return -1;buf[strcspn(buf,"\r\n")]=0;bdaddr_t a;if(strlen(buf)!=17||str2ba(buf,&a)<0)return -1;strcpy(out,buf);return 0;}
 static int save_console(const bdaddr_t *a){char path[512],temp[512],address[18];ba2str(a,address);path_for(path,"console");path_for(temp,"console.tmp");int fd=open(temp,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)return -1;int ok=write(fd,address,17)==17&&fsync(fd)==0;close(fd);if(!ok||rename(temp,path)<0){unlink(temp);return -1;}return 0;}
@@ -112,10 +121,11 @@ static void hid_release(int fd,int usb,vgf_protocol *protocol){
 static void session(SSL *ssl,int tcp,int pair){
     int lock=open("/run/videogamefilter-controller.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600),udp=-1,serial=-1;
     vgf_bt bt={.ctrl=-1,.itr=-1,.listen_ctrl=-1,.listen_itr=-1};vgf_queue queue={0};vgf_protocol protocol={0};unsigned char key[32]={0};
-    uint64_t sequence=0,accepted=0,serial_accepted=0,serial_invalid=0,invalid=0,reports=0,blocked=0,udp_gaps=0;double max_gap=0,last_sent=0,max_udp_gap=0,last_udp=0;int connected=0,use_usb=0,listening=0;vgf_serial_parser serial_parser={0};uint64_t serial_ack_sequence=0;
+    uint64_t sequence=0,accepted=0,serial_accepted=0,serial_invalid=0,invalid=0,reports=0,blocked=0,udp_gaps=0;double max_gap=0,last_sent=0,max_udp_gap=0,last_udp=0;int connected=0,use_usb=0,listening=0,detached=access("/run/vgf-usb-manual-detach",F_OK)==0;vgf_serial_parser serial_parser={0};uint64_t serial_ack_sequence=0;
     if(lock<0||flock(lock,LOCK_EX|LOCK_NB)<0){send_blocking(ssl,"{\"type\":\"error\",\"message\":\"다른 컨트롤러 연결이 사용 중입니다.\"}\n");goto done;}
     if(send_blocking(ssl,"{\"type\":\"status\",\"state\":\"starting\",\"wake\":false}\n"))goto done;
-    if(!pair && (bt.itr=vgf_usb_open())>=0){use_usb=1;connected=1;
+    if(detached){fputs("USB manually detached; waiting for authenticated attach\n",stderr);}
+    else if(!pair && (bt.itr=vgf_usb_open())>=0){use_usb=1;connected=1;
         /* USB needs no radio. An idle BT controller still takes coexistence airtime from Wi-Fi. */
         int r=vgf_bt_rfkill(1);if(r<0)fprintf(stderr,"Bluetooth rfkill block failed: %s\n",strerror(errno));else if(r)fputs("Bluetooth radio blocked for USB session\n",stderr);}
     else {
@@ -134,23 +144,49 @@ static void session(SSL *ssl,int tcp,int pair){
     if(send_blocking(ssl,msg)||set_nonblocking(tcp)<0)goto done;
     serial=vgf_serial_open("/dev/serial0");if(serial>=0)fputs("serial input ready at 115200\n",stderr);
     double started=now_s(),next_report=started,next_status=started,last_input=started,out_started=0,next_usb_check=0;
-    char output[512]={0};size_t output_len=0,output_at=0;int output_want_read=0;
+    char output[512]={0},control_line[128]={0};size_t output_len=0,output_at=0,control_len=0;int output_want_read=0;
     uint8_t pending_report[50];double report_started=0;int have_report=0;vgf_input current={0};
     uint64_t ack_sequence=0;struct sockaddr_in ack_to;
     while(!stopping){
         double now=now_s();
+        if(!connected&&!detached&&!pair&&now>=next_usb_check){
+            int fd=vgf_usb_open();
+            if(fd>=0){close(fd);break;}
+            next_usb_check=now+.25;
+        }
         struct pollfd fds[5]={{tcp,POLLIN,0},{udp,POLLIN,0},{bt.ctrl,POLLIN,0},{bt.itr,POLLIN,0},{serial,POLLIN,0}};
         if(output_len&&!output_want_read)fds[0].events|=POLLOUT;
         /* A USB completion wakes POLLOUT immediately. Do not quantize retries
            into another heartbeat; Bluetooth retains its bounded timed retry. */
         if(connected&&have_report)fds[3].events=use_usb?POLLOUT:0;
-        if(!connected){if(listening){fds[2].fd=bt.listen_ctrl;fds[3].fd=bt.listen_itr;}else{fds[2].events|=POLLOUT;fds[3].events|=POLLOUT;}}
+        if(!connected&&!detached){if(listening){fds[2].fd=bt.listen_ctrl;fds[3].fd=bt.listen_itr;}else{fds[2].events|=POLLOUT;fds[3].events|=POLLOUT;}}
 
         int wait_ms=(int)ceil((next_report-now)*1000);if(wait_ms<0)wait_ms=0;if(wait_ms>8||!connected||(use_usb&&have_report))wait_ms=8;
         int pr=poll(fds,5,wait_ms);if(pr<0&&errno!=EINTR)break;now=now_s();
         if(fds[0].revents&(POLLERR|POLLHUP|POLLNVAL))break;
         if((fds[0].revents&POLLIN)||SSL_pending(ssl)){
-            char junk[1024];int n=SSL_read(ssl,junk,sizeof(junk));if(n<=0){int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;}
+            char incoming[1024];int n=SSL_read(ssl,incoming,sizeof(incoming));if(n<=0){int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;}
+            else for(int i=0;i<n;i++){
+                if(incoming[i]=='\n'){
+                    control_line[control_len]=0;
+                    json_object *request=json_tokener_parse(control_line);
+                    const char *type=string(request,"type"),*action=string(request,"action");
+                    if(type&&!strcmp(type,"usb")&&action){
+                        if(!strcmp(action,"detach")){
+                            if(connected&&bt.itr>=0){hid_release(bt.itr,use_usb,&protocol);vgf_bt_close(&bt);}
+                            connected=0;use_usb=0;
+                            if(VGF_USB_COMMAND("detach")){fprintf(stderr,"USB detach failed\n");goto done;}
+                            detached=1;queue.count=0;have_report=0;current=(vgf_input){0};next_status=0;
+                        }else if(!strcmp(action,"attach")){
+                            if(connected&&bt.itr>=0){hid_release(bt.itr,use_usb,&protocol);vgf_bt_close(&bt);connected=0;}
+                            if(VGF_USB_COMMAND("attach"))fprintf(stderr,"USB attach failed\n");
+                            if(request)json_object_put(request);goto done;
+                        }
+                    }
+                    if(request)json_object_put(request);control_len=0;
+                }else if(control_len<sizeof(control_line)-1)control_line[control_len++]=incoming[i];
+                else control_len=0;
+            }
         }
         if(fds[1].revents&POLLIN){
             for(int i=0;i<64;i++){uint8_t data[57];struct sockaddr_in from;socklen_t fromlen=sizeof(from);ssize_t n=recvfrom(udp,data,sizeof(data),0,(struct sockaddr*)&from,&fromlen);if(n<0){if(errno==EAGAIN||errno==EWOULDBLOCK)break;goto done;}
@@ -177,7 +213,7 @@ static void session(SSL *ssl,int tcp,int pair){
                 if(use_usb||(protocol.vibration&&protocol.player)){double due=fmax(arrived,last_sent+(use_usb?.001:.004));if(due<next_report)next_report=due;}
             }
         }
-        if(!connected){
+        if(!connected&&!detached){
             int ready=listening?vgf_bt_accept(&bt):vgf_bt_ready(&bt);
             if(ready<0 || (!listening&&now-started>8)){
                 if(listening||vgf_bt_listen(&bt))break;listening=1;started=now;
@@ -188,7 +224,11 @@ static void session(SSL *ssl,int tcp,int pair){
         }
         if(connected){
             now=now_s(); /* The UDP drain may have passed the report deadline. */
-            if(use_usb && now>=next_usb_check){if(!vgf_usb_configured())break;next_usb_check=now+.25;}
+            if(now>=next_usb_check){
+                if(use_usb && !vgf_usb_configured())break;
+                if(!use_usb && !pair && vgf_usb_configured())break; /* Return to USB after watchdog recovery. */
+                next_usb_check=now+.25;
+            }
             if((fds[2].revents|fds[3].revents)&(POLLERR|POLLHUP|POLLNVAL))break;
             if(fds[2].revents&POLLIN){uint8_t control[64];ssize_t n=recv(bt.ctrl,control,sizeof(control),0);if(n==0)break;/* HID control channel has no application input payload. */}
             /* Disconnecting releases Bluetooth input. USB must retain its pending
@@ -215,7 +255,7 @@ static void session(SSL *ssl,int tcp,int pair){
            been written to HID. Earlier sequences in the batch go unacknowledged. Old apps never read acks. */
         if(ack_sequence&&!queue.count&&!have_report){uint8_t ack[VGF_ACK_SIZE];vgf_ack(key,ack_sequence,ack);(void)sendto(udp,ack,sizeof(ack),MSG_DONTWAIT,(struct sockaddr*)&ack_to,sizeof(ack_to));ack_sequence=0;}
         if(serial_ack_sequence&&!queue.count&&!have_report&&serial>=0){uint8_t ack[VGF_SERIAL_ACK];vgf_serial_ack(serial_ack_sequence,ack);ssize_t sent=write(serial,ack,sizeof(ack));if(sent>0)serial_ack_sequence=0;}
-        if(now>=next_status&&!output_len){status_line(output,sizeof(output),connected?"connected":(listening?"connecting":"reconnecting"),use_usb);output_len=strlen(output);output_at=0;out_started=now;next_status=now+.5;}
+        if(now>=next_status&&!output_len){status_line(output,sizeof(output),detached?"detached":(connected?"connected":(listening?"connecting":"reconnecting")),use_usb);output_len=strlen(output);output_at=0;out_started=now;next_status=now+.5;}
         if(output_len){int n=SSL_write(ssl,output+output_at,(int)(output_len-output_at));if(n>0){output_at+=(size_t)n;output_want_read=0;if(output_at==output_len)output_at=output_len=0;}
             else {int e=SSL_get_error(ssl,n);if(e!=SSL_ERROR_WANT_READ&&e!=SSL_ERROR_WANT_WRITE)break;output_want_read=e==SSL_ERROR_WANT_READ;}
             if(output_len&&now-out_started>2)break;

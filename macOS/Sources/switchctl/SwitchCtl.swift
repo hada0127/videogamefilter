@@ -8,6 +8,7 @@ usage: switchctl [--socket PATH] <command> [options]
   press BTN[,BTN...] [--hold-ms 100] [--gap-ms 60] [--no-wait]
   input [--buttons BTN,...] [--lx F] [--ly F] [--rx F] [--ry F] [--hold-ms 100] [--gap-ms 60] [--no-wait]
   release
+  controller disconnect|reconnect
   mcp                      MCP stdio server (tools: switch_status, switch_snapshot, switch_press, switch_input, switch_release)
 Buttons: \(AgentProtocol.buttons.joined(separator: " "))
 Axes are -1...1 (ly/ry: positive is up). hold-ms is 1...60000; a new input replaces the current hold
@@ -77,6 +78,10 @@ func run(_ arguments: [String]) -> Outcome {
             let options = try Options(rest, valued: [], booleans: [])
             guard options.positional.isEmpty else { throw UsageError(message: "\(command) takes no arguments") }
             return command == "status" ? commands.status() : commands.release()
+        case "controller":
+            let options = try Options(rest, valued: [], booleans: [])
+            guard options.positional.count == 1, let action = ["disconnect": "detach", "reconnect": "attach"][options.positional[0]] else { throw UsageError(message: "controller needs disconnect or reconnect") }
+            return commands.controller(action)
         case "snapshot":
             let options = try Options(rest, valued: ["max-width", "out"], booleans: [])
             guard options.positional.isEmpty else { throw UsageError(message: "snapshot takes no positional arguments") }

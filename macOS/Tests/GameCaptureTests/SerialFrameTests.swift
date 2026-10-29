@@ -2,6 +2,11 @@ import XCTest
 @testable import GameCapture
 
 final class SerialFrameTests: XCTestCase {
+    func testUSBControlWaitsForAuthenticatedTransport() {
+        XCTAssertFalse(PiControlBridge.canControlUSB(active: true, hasAuthenticatedTransport: false))
+        XCTAssertFalse(PiControlBridge.canControlUSB(active: false, hasAuthenticatedTransport: true))
+        XCTAssertTrue(PiControlBridge.canControlUSB(active: true, hasAuthenticatedTransport: true))
+    }
     func testSerialHealthAndFallbackDecision() {
         XCTAssertFalse(PiControlBridge.serialHealthy(openedAt: 10, lastAck: 0, now: 10.05))
         XCTAssertFalse(PiControlBridge.serialHealthy(openedAt: 10, lastAck: 9, now: 10.05))

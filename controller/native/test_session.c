@@ -12,8 +12,11 @@
 #include <poll.h>
 #include "protocol.h"
 #include "serial.h"
+#include "bluetooth.h"
 
-static int test_tcp=-1,test_hid=-1,test_serial=-1;
+static int test_tcp=-1,test_hid=-1,test_hid_peer=-1,test_serial=-1,test_bt_connected=0;
+static double now_s(void);
+static int *usb_ready;
 static char test_lock[]="/tmp/vgf-session-XXXXXX";
 static int isolated_open(const char *path,int flags,...){
     mode_t mode=0;
@@ -21,9 +24,24 @@ static int isolated_open(const char *path,int flags,...){
     assert(!strcmp(path,"/run/videogamefilter-controller.lock"));
     return open(test_lock,flags,mode);
 }
-static int socket_usb_open(void){return test_hid;}
+static int socket_usb_open(void){return (!usb_ready||*usb_ready)?test_hid:-1;}
 static int socket_serial_open(const char *path){(void)path;return test_serial;}
-static int socket_usb_configured(void){return 1;}
+static int socket_usb_configured(void){return !usb_ready||*usb_ready;}
+static int waiting_bt_setup(vgf_bt *b,const char *sdp){(void)sdp;b->ctrl=b->itr=b->listen_ctrl=b->listen_itr=-1;b->bus=NULL;return 0;}
+static int waiting_bt_connect(vgf_bt *b,const char *address){(void)b;(void)address;return -1;}
+static int waiting_bt_listen(vgf_bt *b){(void)b;return 0;}
+static int waiting_bt_accept(vgf_bt *b){if(!test_bt_connected)return 0;b->itr=test_hid;return 1;}
+static void waiting_bt_close(vgf_bt *b){(void)b;}
+static int checked_usb_command(const char *action){
+    assert(!strcmp(action,"attach"));
+    uint8_t report[50];double deadline=now_s()+.5;
+    while(now_s()<deadline){
+        struct pollfd p={test_hid_peer,POLLIN,0};if(poll(&p,1,20)<=0)continue;
+        assert(read(test_hid_peer,report,sizeof(report))==sizeof(report));
+        if(!(report[4]&(1u<<3)))return 0; /* Neutral arrived before helper work. */
+    }
+    assert(0 && "Bluetooth neutral was not sent before USB attach");return -1;
+}
 static int rfkill_blocked=-1;
 static int recorded_rfkill(int block){rfkill_blocked=block;return 1;}
 /* Order of the first HID write of `watched` and the first ack datagram. */
@@ -41,6 +59,12 @@ static int plain_error(const SSL *ssl,int n){(void)ssl;return n<0&&(errno==EAGAI
 #define vgf_serial_open socket_serial_open
 #define vgf_usb_configured socket_usb_configured
 #define vgf_bt_rfkill recorded_rfkill
+#define vgf_bt_setup waiting_bt_setup
+#define vgf_bt_connect waiting_bt_connect
+#define vgf_bt_listen waiting_bt_listen
+#define vgf_bt_accept waiting_bt_accept
+#define vgf_bt_close waiting_bt_close
+#define VGF_USB_COMMAND checked_usb_command
 #define write ordered_write
 #define sendto ordered_sendto
 #define SSL_write plain_write
@@ -54,6 +78,12 @@ static int plain_error(const SSL *ssl,int n){(void)ssl;return n<0&&(errno==EAGAI
 #undef vgf_serial_open
 #undef vgf_usb_configured
 #undef vgf_bt_rfkill
+#undef vgf_bt_setup
+#undef vgf_bt_connect
+#undef vgf_bt_listen
+#undef vgf_bt_accept
+#undef vgf_bt_close
+#undef VGF_USB_COMMAND
 #undef write
 #undef sendto
 #undef SSL_write
@@ -199,8 +229,46 @@ static void usb_cleanup_is_bounded(void){
     double started=now_s();hid_release(hid[0],1,&protocol);double elapsed=now_s()-started;
     assert(elapsed>=.03&&elapsed<.5);close(hid[0]);close(hid[1]);
 }
+static void pending_bluetooth_returns_to_usb(void){
+    int hid[2],tcp[2];socket_hid(hid);assert(socketpair(AF_UNIX,SOCK_STREAM,0,tcp)==0);
+    usb_ready=mmap(NULL,sizeof(*usb_ready),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+    assert(usb_ready!=MAP_FAILED);*usb_ready=0;
+    pid_t child=fork();assert(child>=0);
+    if(!child){
+        alarm(3);close(hid[1]);close(tcp[1]);test_tcp=tcp[0];test_hid=hid[0];
+        session(NULL,tcp[0],0);close(tcp[0]);_exit(0);
+    }
+    close(hid[0]);close(tcp[0]);unsigned char key[32];struct sockaddr_in peer;read_transport(tcp[1],key,&peer);
+    assert(waitpid(child,NULL,WNOHANG)==0);
+    *usb_ready=1;wait_child(child);
+    close(tcp[1]);close(hid[1]);munmap(usb_ready,sizeof(*usb_ready));usb_ready=NULL;
+}
+static void bluetooth_release_precedes_attach_work(void){
+    int hid[2],tcp[2],ready=0;char state[]="/tmp/vgf-attach-XXXXXX";
+    assert(mkdtemp(state));assert(socketpair(AF_UNIX,SOCK_SEQPACKET,0,hid)==0);
+    assert(socketpair(AF_UNIX,SOCK_STREAM,0,tcp)==0);
+    pid_t child=fork();assert(child>=0);
+    if(!child){
+        alarm(4);close(tcp[1]);test_tcp=tcp[0];test_hid=hid[0];test_hid_peer=hid[1];
+        test_bt_connected=1;usb_ready=&ready;root=state;
+        session(NULL,tcp[0],0);close(tcp[0]);_exit(0);
+    }
+    close(tcp[0]);close(hid[0]);unsigned char key[32];struct sockaddr_in peer;
+    read_transport(tcp[1],key,&peer);
+    int udp=socket(AF_INET,SOCK_DGRAM,0);assert(udp>=0);send_input(udp,&peer,key,1,1u<<A);
+    uint8_t report[50];int held=0;double deadline=now_s()+1;
+    while(!held&&now_s()<deadline){
+        struct pollfd p={hid[1],POLLIN,0};if(poll(&p,1,50)<=0)continue;
+        assert(read(hid[1],report,sizeof(report))==sizeof(report));held=(report[4]&(1u<<3))!=0;
+    }
+    assert(held);
+    const char command[]="{\"type\":\"usb\",\"action\":\"attach\"}\n";
+    assert(write(tcp[1],command,sizeof(command)-1)==(ssize_t)(sizeof(command)-1));
+    wait_child(child);close(tcp[1]);close(hid[1]);close(udp);
+    char console[256];snprintf(console,sizeof(console),"%s/console",state);unlink(console);assert(rmdir(state)==0);
+}
 int main(void){
     signal(SIGPIPE,SIG_IGN);alarm(10);int lock=mkstemp(test_lock);assert(lock>=0);close(lock);
-    usb_session_survives_stall();usb_report_precedes_ack();serial_session_precedes_ack_and_rejects_old_udp();usb_cleanup_releases_after_resume();usb_cleanup_is_bounded();
-    assert(unlink(test_lock)==0);puts("PASS USB session survives 100ms backpressure, ordered queued edges after resume, single newest ack after HID delivery, HID report precedes ack, serial ack follows HID, old UDP rejected, newer UDP fallback accepted, Bluetooth radio blocked, neutral cleanup retry, bounded stalled cleanup");return 0;
+    usb_session_survives_stall();usb_report_precedes_ack();serial_session_precedes_ack_and_rejects_old_udp();usb_cleanup_releases_after_resume();usb_cleanup_is_bounded();pending_bluetooth_returns_to_usb();bluetooth_release_precedes_attach_work();
+    assert(unlink(test_lock)==0);puts("PASS USB session survives backpressure, ordered HID/acks, neutral cleanup, pending Bluetooth returns to USB, Bluetooth releases before attach helper");return 0;
 }

@@ -39,6 +39,21 @@ final class PiControlBridge: ControllerSession, @unchecked Sendable {
     private var host = ""
     private var device: PairedPi?
     var onMessage: (@Sendable (String, String?) -> Void)?
+    var onUSBState: (@Sendable (String) -> Void)?
+
+    func controlUSB(_ action: String) {
+        queue.async { [self] in
+            guard Self.canControlUSB(active: active, hasAuthenticatedTransport: udp != nil), action == "detach" || action == "attach" else { return }
+            if action == "detach" {
+                lock.lock(); pending.append(.neutral, at: ProcessInfo.processInfo.systemUptime); lock.unlock()
+                flush()
+            }
+            write(["type": "usb", "action": action])
+        }
+    }
+    static func canControlUSB(active: Bool, hasAuthenticatedTransport: Bool) -> Bool {
+        active && hasAuthenticatedTransport
+    }
 
     func send(_ value: ControllerInput) {
         lock.lock()
@@ -137,6 +152,7 @@ final class PiControlBridge: ControllerSession, @unchecked Sendable {
                 catch { fail(error.localizedDescription); return }
             case "status":
                 guard let state = message["state"] as? String else { continue }
+                if let usbState = message["usbState"] as? String { onUSBState?(usbState) }
                 startup = state == "starting" || state == "waiting"
                 if state == "connected" && !hidConnected {
                     serialRetrySeconds = 1; lastSerialAttempt = 0

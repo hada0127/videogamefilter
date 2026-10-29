@@ -33,6 +33,7 @@ final class FakeAgentHost: @unchecked Sendable {
                 return .success(["forwardedAt": 1.0, "until": ProcessInfo.processInfo.systemUptime + Double(args.holdMs) / 1000])
             },
             release: { [self] in lock.lock(); releases += 1; lock.unlock(); return ["released": true] },
+            usb: { action in .success(["requested": action]) },
             frame: { [self] in
                 lock.lock(); let gate = gate, frame = frame; lock.unlock()
                 if let gate { entered.signal(); gate.wait() }

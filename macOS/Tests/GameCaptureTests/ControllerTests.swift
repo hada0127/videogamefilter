@@ -62,6 +62,10 @@ final class ControllerTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: boot.appendingPathComponent("cmdline.txt")), command)
     }
     @MainActor func testPendingEnrollmentRecoveryAndAutomaticGamepadHandlers() throws {
+        let originalSource = UserDefaults.standard.object(forKey: "controller.source")
+        UserDefaults.standard.set("gamepad", forKey: "controller.source")
+        defer { if let originalSource { UserDefaults.standard.set(originalSource, forKey: "controller.source") }
+                else { UserDefaults.standard.removeObject(forKey: "controller.source") } }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -82,6 +86,23 @@ final class ControllerTests: XCTestCase {
         XCTAssertNotNil(pads[0].extendedGamepad?.valueChangedHandler)
         XCTAssertFalse(model.selected.isEmpty)
         model.selectController(""); model.refresh(); XCTAssertTrue(model.selected.isEmpty)
+    }
+    @MainActor func testOfflinePreferredPiUsesAvailableFallbackAndReturns() {
+        XCTAssertEqual(ControllerModel.effectivePi(preferred: "saved", current: "saved", available: ["other"]), "other")
+        XCTAssertEqual(ControllerModel.effectivePi(preferred: "saved", current: "other", available: ["other", "saved"]), "saved")
+        XCTAssertNil(ControllerModel.effectivePi(preferred: "saved", current: "saved", available: []))
+    }
+    @MainActor func testUSBReconnectIntentSurvivesOldSessionStatus() {
+        let old = UUID(), replacement = UUID()
+        XCTAssertFalse(ControllerModel.shouldClearReconnectIntent(origin: old, current: old, connected: true))
+        XCTAssertFalse(ControllerModel.shouldClearReconnectIntent(origin: old, current: replacement, connected: false))
+        XCTAssertTrue(ControllerModel.shouldClearReconnectIntent(origin: old, current: replacement, connected: true))
+    }
+    @MainActor func testObsoleteSessionCannotPublishUSBState() {
+        let store = PiDeviceStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), credentialSave: { _, _ in true })
+        let model = ControllerModel(startDiscovery: false, controllerProvider: { [] }, store: store)
+        model.receiveUSBState("configured", from: UUID())
+        XCTAssertEqual(model.usbState, "unavailable")
     }
     func testSDCommitFailureRestoresOriginalFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
