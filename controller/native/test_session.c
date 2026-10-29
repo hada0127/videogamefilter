@@ -21,8 +21,8 @@ static char test_lock[]="/tmp/vgf-session-XXXXXX";
 static int isolated_open(const char *path,int flags,...){
     mode_t mode=0;
     if(flags&O_CREAT){va_list ap;va_start(ap,flags);mode=va_arg(ap,int);va_end(ap);}
-    assert(!strcmp(path,"/run/videogamefilter-controller.lock"));
-    return open(test_lock,flags,mode);
+    if(!strcmp(path,"/run/videogamefilter-controller.lock"))path=test_lock;
+    return open(path,flags,mode);
 }
 static int socket_usb_open(void){return (!usb_ready||*usb_ready)?test_hid:-1;}
 static int socket_serial_open(const char *path){(void)path;return test_serial;}
@@ -118,6 +118,16 @@ static void read_transport(int tcp,unsigned char key[32],struct sockaddr_in *pee
             json_object_put(o);return;
         }
         json_object_put(o);
+    }
+}
+static void wait_connected(int tcp){
+    char line[512];
+    for(;;){
+        size_t used=0;
+        do{assert(used<sizeof(line)-1);assert(read(tcp,line+used,1)==1);}while(line[used++]!='\n');
+        line[used]=0;json_object *o=json_tokener_parse(line);assert(o);
+        const char *state=string(o,"state");int connected=state&&!strcmp(state,"connected");
+        json_object_put(o);if(connected)return;
     }
 }
 static void send_input(int fd,const struct sockaddr_in *peer,const unsigned char key[32],uint64_t sequence,uint32_t buttons){
@@ -246,6 +256,7 @@ static void pending_bluetooth_returns_to_usb(void){
 static void bluetooth_release_precedes_attach_work(void){
     int hid[2],tcp[2],ready=0;char state[]="/tmp/vgf-attach-XXXXXX";
     assert(mkdtemp(state));assert(socketpair(AF_UNIX,SOCK_SEQPACKET,0,hid)==0);
+    assert(set_nonblocking(hid[0])==0);
     assert(socketpair(AF_UNIX,SOCK_STREAM,0,tcp)==0);
     pid_t child=fork();assert(child>=0);
     if(!child){
@@ -254,7 +265,7 @@ static void bluetooth_release_precedes_attach_work(void){
         session(NULL,tcp[0],0);close(tcp[0]);_exit(0);
     }
     close(tcp[0]);close(hid[0]);unsigned char key[32];struct sockaddr_in peer;
-    read_transport(tcp[1],key,&peer);
+    read_transport(tcp[1],key,&peer);wait_connected(tcp[1]);
     int udp=socket(AF_INET,SOCK_DGRAM,0);assert(udp>=0);send_input(udp,&peer,key,1,1u<<A);
     uint8_t report[50];int held=0;double deadline=now_s()+1;
     while(!held&&now_s()<deadline){
