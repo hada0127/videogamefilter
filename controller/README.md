@@ -107,7 +107,10 @@ remain compatible with the earlier service.
 
 Use the **Basic / 기본**, **Retro effects / 레트로 효과**, and **Controller / 컨트롤러** tabs.
 HOME, Capture, L+R, and Close stay visible above every tab. A physical controller's Home/Guide signal received from Moonlight is
-forwarded as Switch HOME. There is no START+SELECT remapping; PLUS and MINUS stay independent.
+forwarded as Switch HOME. When a local gamepad is selected, the app takes over its Home/Guide and
+Xbox Share, Menu (+), and Options (-) buttons from macOS system gestures, forwarding them as
+Switch HOME, Capture, +, and -. The app restores system gestures when it loses focus, that
+gamepad is deselected, or the app quits. There is no START+SELECT remapping.
 
 For USB, connect the Zero W's **USB data port** (not PWR IN) to a Switch dock USB port
 using a data cable. If the console does not accept wired input, check **Settings →

@@ -63,11 +63,28 @@ final class ControllerInputPipeline: @unchecked Sendable {
         return agentUntilDisplay
     }
 
-    deinit { timer?.cancel(); axisWork?.cancel(); agentWork?.cancel() }
+    deinit {
+        if let controller { Self.setSystemGestures(controller, .enabled) }
+        timer?.cancel(); axisWork?.cancel(); agentWork?.cancel()
+    }
+
+    private static func setSystemGestures(_ controller: GCController, _ state: GCControllerElement.SystemGestureState) {
+        guard let pad = controller.extendedGamepad else { return }
+        // Home and Xbox Share can be reserved by macOS. Menu/Options must also
+        // remain available as Switch + and - while this is the selected source.
+        pad.buttonHome?.preferredSystemGestureState = state
+        (pad as? GCXboxGamepad)?.buttonShare?.preferredSystemGestureState = state
+        pad.buttonMenu.preferredSystemGestureState = state
+        pad.buttonOptions?.preferredSystemGestureState = state
+    }
 
     @discardableResult
     func select(_ selected: GCController?, remote: Bool, reset: Bool = false) -> UUID {
         queue.sync {
+            if controller !== selected || remote {
+                if let controller { Self.setSystemGestures(controller, .enabled) }
+            }
+            if let selected { Self.setSystemGestures(selected, active && !remote ? .disabled : .enabled) }
             guard reset || controller !== selected || self.remote != remote else { return source }
             controller?.extendedGamepad?.valueChangedHandler = nil
             source = UUID(); controller = selected; self.remote = remote
@@ -112,6 +129,7 @@ final class ControllerInputPipeline: @unchecked Sendable {
     func setApplicationActive(_ value: Bool) {
         queue.sync {
             active = value; receivedAt = nil
+            if let controller { Self.setSystemGestures(controller, value && !remote ? .disabled : .enabled) }
             if !value { pulse = nil; local = .neutral }
             else if let pad = controller?.extendedGamepad { local = ControllerInput.read(pad, positional: false) }
             tick(heartbeat: true)

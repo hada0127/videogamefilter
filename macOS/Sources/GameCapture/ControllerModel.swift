@@ -68,7 +68,8 @@ import AgentControlProtocol
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [inputPipeline] _ in
             inputPipeline.setApplicationActive(true)
         })
-        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self, inputPipeline] _ in
+            inputPipeline.select(nil, remote: false)
             Task { @MainActor in self?.disconnect(manual: false) }
         })
         if UserDefaults.standard.bool(forKey: "controller.moonlight") {

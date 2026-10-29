@@ -27,6 +27,49 @@ final class RecordingControllerSession: ControllerSession, @unchecked Sendable {
 }
 
 final class ControllerPipelineTests: XCTestCase {
+    func testSelectedGamepadOwnsSystemButtonsAndRestoresThemOnSourceChange() throws {
+        let pipeline = ControllerInputPipeline(heartbeat: false)
+        let first = GCController.withExtendedGamepad()
+        let second = GCController.withExtendedGamepad()
+        let firstPad = try XCTUnwrap(first.extendedGamepad)
+        pipeline.select(first, remote: false)
+        XCTAssertEqual(firstPad.buttonHome?.preferredSystemGestureState, .enabled)
+        pipeline.setApplicationActive(true)
+        XCTAssertEqual(firstPad.buttonMenu.preferredSystemGestureState, .disabled)
+        XCTAssertEqual(firstPad.buttonOptions?.preferredSystemGestureState, .disabled)
+        XCTAssertEqual(firstPad.buttonHome?.preferredSystemGestureState, .disabled)
+        pipeline.setApplicationActive(false)
+        XCTAssertEqual(firstPad.buttonHome?.preferredSystemGestureState, .enabled)
+        pipeline.setApplicationActive(true)
+        XCTAssertEqual(firstPad.buttonHome?.preferredSystemGestureState, .disabled)
+        pipeline.select(second, remote: false)
+        XCTAssertEqual(firstPad.buttonMenu.preferredSystemGestureState, .enabled)
+        XCTAssertEqual(firstPad.buttonOptions?.preferredSystemGestureState, .enabled)
+        XCTAssertEqual(firstPad.buttonHome?.preferredSystemGestureState, .enabled)
+        pipeline.select(nil, remote: true)
+        XCTAssertEqual(second.extendedGamepad?.buttonMenu.preferredSystemGestureState, .enabled)
+    }
+
+    func testHomeMenuAndOptionsCallbacksForwardSwitchButtons() throws {
+        let pipeline = ControllerInputPipeline(heartbeat: false)
+        let controller = GCController.withExtendedGamepad()
+        let pad = try XCTUnwrap(controller.extendedGamepad)
+        let home = try XCTUnwrap(pad.buttonHome)
+        let options = try XCTUnwrap(pad.buttonOptions)
+        pipeline.select(controller, remote: false)
+        pipeline.setApplicationActive(true)
+        let session = RecordingControllerSession(); pipeline.setSession(session); _ = session.drain()
+        pipeline.queue.sync {
+            for (button, name) in [(home, "HOME"), (pad.buttonMenu, "PLUS"), (options, "MINUS")] {
+                button.setValue(1); pad.valueChangedHandler?(pad, button)
+                XCTAssertEqual(session.drain().last?.buttons, [name])
+                button.setValue(0); pad.valueChangedHandler?(pad, button)
+                XCTAssertEqual(session.drain().last, .neutral)
+            }
+        }
+        pipeline.setSession(nil)
+    }
+
     @MainActor func testInstalledGameControllerHandlerSnapshotsBeforeLaterMutation() {
         let pipeline = ControllerInputPipeline(heartbeat: false)
         let controller = GCController.withExtendedGamepad()
