@@ -1,11 +1,72 @@
 import XCTest
 import GameController
 @testable import GameCapture
+
+private final class SilentPiService: NetService {
+    var resolveCount = 0
+    var stopCount = 0
+    var testAddresses: [Data]?
+    var testTXT: Data?
+    override var addresses: [Data]? { testAddresses }
+    override var port: Int { 24872 }
+    override func txtRecordData() -> Data? { testTXT }
+    override func resolve(withTimeout timeout: TimeInterval) { resolveCount += 1 }
+    override func stop() { stopCount += 1 }
+    override func schedule(in aRunLoop: RunLoop, forMode mode: RunLoop.Mode) {}
+}
+
 final class ControllerTests: XCTestCase {
     @MainActor func testDiscoveryPrefersLANOverWildcardDNS() {
         XCTAssertEqual(PiDiscovery.preferredHost(["218.38.137.27", "192.168.0.139"]), "192.168.0.139")
         XCTAssertEqual(PiDiscovery.preferredHost(["192.168.0.139", "218.38.137.27"]), "192.168.0.139")
         XCTAssertNil(PiDiscovery.preferredHost([]))
+    }
+    @MainActor func testSilentPiResolveIsReplacedAndRemovedServiceCannotRetry() {
+        let id = UUID().uuidString
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr = in_addr(s_addr: inet_addr("192.168.0.139"))
+        let addressData = withUnsafeBytes(of: &address) { Data($0) }
+        var resolvers: [SilentPiService] = []
+        var timers: [() -> Void] = []
+        let discovery = PiDiscovery(makeResolver: { domain, type, name in
+            let service = SilentPiService(domain: domain, type: type, name: name)
+            service.testAddresses = [addressData]
+            service.testTXT = NetService.data(fromTXTRecord: ["id": Data(id.utf8)])
+            resolvers.append(service)
+            return service
+        }, scheduleRetry: { delay, action in
+            XCTAssertEqual(delay, 12)
+            timers.append(action)
+        })
+        var published: [DiscoveredPi] = []
+        discovery.onChange = { published = $0 }
+        let browser = NetServiceBrowser()
+        let found = NetService(domain: "local.", type: "_vgf-controller._tcp.", name: "switch-pi")
+        discovery.netServiceBrowser(browser, didFind: found, moreComing: false)
+        XCTAssertEqual(resolvers.count, 1)
+        XCTAssertEqual(resolvers[0].resolveCount, 1)
+        timers.removeFirst()()
+        XCTAssertEqual(resolvers.count, 2)
+        XCTAssertEqual(resolvers[0].stopCount, 1)
+        XCTAssertEqual(resolvers[1].resolveCount, 1)
+        discovery.netServiceDidResolveAddress(resolvers[0])
+        XCTAssertTrue(published.isEmpty)
+        discovery.netServiceDidResolveAddress(resolvers[1])
+        XCTAssertEqual(published.first?.id, id)
+        XCTAssertEqual(published.first?.host, "192.168.0.139")
+        discovery.netServiceBrowser(browser, didRemove: found, moreComing: false)
+        XCTAssertTrue(published.isEmpty)
+        timers.removeFirst()()
+        XCTAssertEqual(resolvers.count, 2)
+        let removedBeforeResolve = NetService(domain: "local.", type: "_vgf-controller._tcp.", name: "another-pi")
+        discovery.netServiceBrowser(browser, didFind: removedBeforeResolve, moreComing: false)
+        XCTAssertEqual(resolvers.count, 3)
+        discovery.netServiceBrowser(browser, didRemove: removedBeforeResolve, moreComing: false)
+        XCTAssertEqual(resolvers[2].stopCount, 1)
+        timers.removeFirst()()
+        XCTAssertEqual(resolvers.count, 3)
     }
     func testDeadzoneAndEndpoints() {
         XCTAssertEqual(ControllerInput.axis(0.07), 0)
